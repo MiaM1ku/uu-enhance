@@ -1,0 +1,56 @@
+name: build-release
+
+# 发布 Release 后自动触发：构建 Release 版并把产物传回该 Release。
+# 也支持手动触发（Actions 页面 Run workflow，填已存在的 tag）。
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "已存在的 Release tag（如 v1.0.3）"
+        required: true
+
+permissions:
+  contents: write   # gh release upload 需要写权限
+
+jobs:
+  build:
+    # 钉 2022：windows-latest 已迁到 windows-2025，cmake 找不到 VS2022 实例
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+
+      # tag（去掉 v）必须等于 app.h 里的 UURE_VERSION，否则安装器的更新检查会对不上
+      - name: 校验版本号与 tag 一致
+        run: |
+          $ver = (Select-String -Path src/app.h -Pattern '#define\s+UURE_VERSION\s+"([^"]+)"').Matches[0].Groups[1].Value
+          $tag = $env:TAG -replace '^v',''
+          Write-Host "app.h UURE_VERSION=$ver  tag=$tag"
+          if ($ver -ne $tag) {
+            Write-Error "版本号不一致：app.h 是 $ver，但 Release tag 是 $env:TAG。请对齐后重发。"
+            exit 1
+          }
+
+      - name: 安装 UPX（压缩安装器）
+        run: choco install upx -y
+
+      - name: 配置 (CMake + VS2022 x64)
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+
+      - name: 构建 Release
+        run: cmake --build build --config Release
+
+      - name: 上传产物到 Release
+        run: |
+          $exe = Get-ChildItem build/Release/uu-enhance-installer-*.exe | Select-Object -First 1
+          if (-not $exe) { Write-Error "缺少安装器产物"; exit 1 }
+          $dll = "build/Release/version.dll"
+          if (-not (Test-Path $dll)) { Write-Error "缺少产物 $dll"; exit 1 }
+          gh release upload $env:TAG $exe.FullName $dll --clobber

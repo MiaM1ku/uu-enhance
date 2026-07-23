@@ -42,15 +42,14 @@ GitHub 仓库地址也在这里（`UURE_GITHUB` / `UURE_GITHUB_W`），安装器
    git push origin main --tags
    ```
    tag 格式固定为 `vX.Y.Z`，安装器的更新检查从 GitHub Release 的 `tag_name` 取这个值，去掉 `v` 前缀后跟本地版本比较。
-5. **创建 GitHub Release**：
+5. **创建 GitHub Release**（只建空壳，产物交给 Action）：
    ```powershell
-   gh release create v0.2.0 `
-     build/Release/version.dll `
-     build/Release/uu-enhance-installer.exe `
-     --title "v0.2.0" `
-     --notes "改动说明"
+   gh release create v0.2.0 --title "v0.2.0" --notes "改动说明"
    ```
-   附件**必须包含** `uu-enhance-installer.exe`（用户从 Release 下载这个就够了，DLL 已内嵌）。`version.dll` 也附上方便手动安装的用户。
+   发布后 `.github/workflows/release.yml` 会自动在 windows-latest 上构建 Release，并把 `uu-enhance-installer.exe` 和 `version.dll` 传回这个 Release。**不用再本地附加附件**。
+   - workflow 会先校验 tag（去 `v`）等于 `app.h` 的 `UURE_VERSION`，不一致直接失败——防止更新检查对不上。
+   - 想手动重跑：Actions 页面选 `build-release` → Run workflow，填已存在的 tag。
+   - 产物里 `uu-enhance-installer.exe` 是用户下载的主体（DLL 已内嵌），`version.dll` 附上方便手动安装的用户。
 
 ## 安装器更新检查
 
@@ -67,10 +66,10 @@ src/           补丁本体
   dllmain.cpp  入口：代理转发 + 后台线程
   proxy.cpp    version.dll 17 个导出转发
   hooks.cpp    功能 hook + 按版本分流定位 + 会话管理
-  resolver.cpp 抗更新定位器（字符串 + .pdata + AOB）
+  resolver.cpp 抗更新定位器（字符串 + .pdata）
   tray.cpp     系统托盘菜单
   config.cpp   ini 读写
-  offsets.h    各函数 RVA 表（已知版本）
+  offsets.h    已知版本的对象偏移和被控状态包装器 RVA
 
 installer/     一键安装器
   installer.cpp  GUI + 自动查找 + 释放/卸载 + 更新检查
@@ -79,7 +78,6 @@ installer/     一键安装器
   installer.manifest  管理员权限 + 现代控件 + 高 DPI
 
 vendor/minhook/ MinHook 源码
-docs/TECHNICAL.md 逆向分析文档
 ```
 
 ## 适配 GameViewer 新版本
@@ -87,9 +85,11 @@ docs/TECHNICAL.md 逆向分析文档
 如果用户报告某个 hook 挂不上（托盘调试信息里显示"未定位"），需要：
 
 1. 拿到新版 GameViewer.exe，用 IDA 打开
-2. 按 `docs/TECHNICAL.md` 里的地址表，用日志字符串 xref 重新定位各函数
-3. 更新 `src/offsets.h` 里对应版本的 RVA
-4. 确认 CCS 的 `device_id` 偏移（`+0x3984`）有没有变
-5. 重新构建、测试、发版
+2. 按 `src/hooks.cpp` 的 `kHooks[]` 日志字符串确认各函数仍能定位
+3. 在 `src/offsets.h` 的 `kVer[]` 最前面加一行新版本；新版放最前是因为 `pick()` 对未知版本兜底用 `kVer[0]`
+4. 确认 CCS 的 `device_id` 偏移（`VerSet::deviceIdOff`，十进制）有没有变：反编译 `setConnectInfo`，看 "startConnectOtherDevice, device_id: " 那行日志把 `this + N` 传给 ostream<<string，`N` 就是偏移。4.26=3984、4.29=4296，逐版本会变，必须核对
+5. 确认 `VideoMainWindow`（每会话视频窗，托盘会话名来源）的两个偏移 `VerSet::vmwDevIdOff`/`vmwTitleOff`（十进制）：反编译它的构造函数（日志锚点 "home_control_session_start: window_created, device_id="），看 `QString::QString(this+N, deviceId)` 得 `vmwDevIdOff`；构造里紧跟的空 QString（后续 `setWindowTitle(this, this+M)` 用它）得 `vmwTitleOff`。4.29=344/352。读错只回退显示 deviceId，不致命，但要好友名就得核对
+6. 确认两个 `isControlled()` 包装器 RVA，以及 `HomePageContent` 状态成员的偏移和表示。4.33.0.8907 的通用/直接包装器 RVA 分别为 `0x73fe10`/`0x4ea310`，状态成员为 `+0x30` 的内嵌对象
+7. 重新构建、测试、发版
 
-多数情况下字符串定位（resolver.cpp）会自动对上，不用改代码。只有 UU 改了函数名/日志内容/二进制结构时才需要手动更新。
+多数 hook 会由 `resolver.cpp` 自动按字符串定位。版本表只提供结构体偏移和无法用日志字符串定位的被控状态包装器；只有 UU 改了函数名、日志内容或二进制结构时才需要调整定位逻辑。

@@ -12,16 +12,20 @@
 #include "config.h"
 #include "log.h"
 #include "resolver.h"
+#include "xdisasm.h"
+#include "hookset.h"
 #include "session.h"
+#include "srvdbg.h"
 
-// 原函数指针（trampoline）
 using fn_send_t   = void*(__fastcall*)(void*, void*, void*, void*, void*, void*, void*, void*);
 using fn_cap_t    = void (__fastcall*)(void* thiz, unsigned __int8 enable, char toast, char a4);
 using fn_clipupd_t= void (__fastcall*)(void* thiz);
 using fn_fmtlist_t= __int64(__fastcall*)(void* thiz, void* a2, void* a3);
 using fn_clipget_t= __int64(__fastcall*)(void* hwnd, unsigned int fmt, void* out);
 using fn_sendfmt_t= __int64(__fastcall*)(void* thiz);
+using fn_clipreq_t= __int64(__fastcall*)(void* thiz, void* a2, void* a3);
 using fn_gpupd_t  = void (__fastcall*)(void* thiz, void* padState);
+using fn_vmwctor_t= __int64(__fastcall*)(void* thiz, void* devidQs, void* a3, void* sp, int a5, __int64 a6);
 
 static fn_send_t    o_sendMouse = nullptr, o_sendWheel = nullptr, o_sendKey = nullptr;
 static fn_cap_t     o_enableCapture = nullptr;
@@ -29,25 +33,41 @@ static fn_clipupd_t o_clipUpdate = nullptr;
 static fn_fmtlist_t o_clipFmtList = nullptr;
 static fn_clipget_t o_clipGet = nullptr;
 static fn_sendfmt_t o_clipSendFmt = nullptr;
+static fn_clipreq_t o_clipReq = nullptr;
 static fn_gpupd_t   o_gamepadUpdate = nullptr, o_gamepadConnect = nullptr, o_gamepadDisconnect = nullptr;
+static fn_vmwctor_t o_vmwCtor = nullptr;
 
-// CCS 内 device_id (std::string) 偏移，由所选版本表设置；仅用于去重/回退名(读错不影响分会话)
+using fn_lock_t = BOOL(WINAPI*)(void);
+static fn_lock_t o_lockWorkStation = nullptr;
+static BOOL WINAPI h_lockWorkStation(void) {
+    if (cfg::srv_block(cfg::SF_PRIVACY)) { uu_log("view-only: blocked LockWorkStation"); return TRUE; }
+    return o_lockWorkStation();
+}
+
 static uintptr_t CCS_DEVICE_ID_OFF = 3984;
+static uintptr_t VMW_DEVICE_ID_OFF = 344;
+static uintptr_t VMW_TITLE_OFF     = 352;
+static bool      g_devIdAuto  = false;
+static bool      g_vmwOffAuto = false;
 
-// 每个会话的状态，用 CCS 指针做 key
-struct SessState { bool viewOnly; bool clipSync; bool gamepadOff; std::wstring devid; std::wstring name; DWORD lastNameTick; };
+struct SessState { bool viewOnly; bool clipSync; bool gamepadOff; std::wstring devid; };
 static std::mutex                 g_smtx;
 static std::map<void*, SessState> g_sessions;
-static void*                      g_activeCCS = nullptr;   // 最近有输入事件的会话(前台)
+static void*                      g_activeCCS = nullptr;
 
-// SEH 安全读取 CCS+OFF 处 std::string 的字节到 POD 缓冲(无 C++ 对象，可用 __try)
+static std::map<std::wstring, void*> g_devidToVmw;
+
+static void*                      g_serverClip = nullptr;
+static std::map<void*, void*>     g_clipToCcs;
+static thread_local void*         t_curClip = nullptr;
+
 static int safe_copy_devid(void* ccs, char* buf, int bufsz) {
     __try {
         char* s = (char*)ccs + CCS_DEVICE_ID_OFF;
         size_t len = *(size_t*)(s + 16);
         size_t cap = *(size_t*)(s + 24);
         const char* p = (cap >= 16) ? *(const char**)s : s;
-        if (!p || len == 0 || len >= (size_t)bufsz) return 0;   // 用 size_t 比较，len 是垃圾大值也不会变负绕过
+        if (!p || len == 0 || len >= (size_t)bufsz) return 0;
         for (size_t i = 0; i < len; ++i) { unsigned char c = (unsigned char)p[i]; if (c < 0x20) return 0; buf[i] = p[i]; }
         return (int)len;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
@@ -63,58 +83,143 @@ static std::wstring read_device_id(void* ccs) {
     return w;
 }
 
+// QString layout: d ptr -> QArrayData [+4]int size [+16]qptrdiff offset; chars at (char*)d+offset
+static int safe_copy_qstr(const void* qsHolder, wchar_t* buf, int cap) {
+    __try {
+        const unsigned char* d = *(const unsigned char* const*)qsHolder;
+        if (!d) return 0;
+        int size = *(const int*)(d + 4);
+        long long off = *(const long long*)(d + 16);
+        if (size <= 0 || size >= cap) return 0;
+        const unsigned short* s = (const unsigned short*)(d + off);
+        for (int i = 0; i < size; ++i) {
+            unsigned short c = s[i];
+            if (c == 0) return i;
+            buf[i] = (wchar_t)c;
+        }
+        return size;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+static std::wstring read_qstring(const void* qsHolder) {
+    wchar_t buf[256];
+    int n = safe_copy_qstr(qsHolder, buf, 256);
+    if (n <= 0) return L"";
+    return std::wstring(buf, n);
+}
 
-// 取/建会话状态(持 g_smtx)
+static uintptr_t derive_off_after_str(const resolver::ModRange& r, uintptr_t func, const char* anchorStr) {
+    if (!func) return 0;
+    uintptr_t sa = resolver::find_string(r, anchorStr);
+    if (!sa) return 0;
+    const uint8_t* p0 = (const uint8_t*)func;
+    const uint8_t* end = p0 + 0x400;
+    if ((uintptr_t)end > r.text_end) end = (const uint8_t*)r.text_end;
+    const uint8_t* after = nullptr;
+    for (const uint8_t* q = p0; q < end; ) {
+        xd::Insn i = xd::decode(q);
+        if (!i.len) { ++q; continue; }
+        if (i.opcode == 0x8D && !i.two_byte && i.rip_rel && xd::rip_target(q, i) == sa) { after = q + i.len; break; }
+        q += i.len;
+    }
+    if (!after) return 0;
+    const uint8_t* s2end = after + 0x40;
+    if ((uintptr_t)s2end > (uintptr_t)end) s2end = end;
+    for (const uint8_t* q = after; q < s2end; ) {
+        xd::Insn i = xd::decode(q);
+        if (!i.len) { ++q; continue; }
+        if (i.opcode == 0x8D && !i.two_byte && i.has_modrm && i.mod == 2 && i.rm != 4 && i.rm != 5) {
+            int32_t disp = i.disp;
+            if (disp >= 0x40 && disp <= 0x8000) return (uintptr_t)disp;
+        }
+        q += i.len;
+    }
+    return 0;
+}
+
+// handleKeyEvent 内定位 sub_1406A8120(普通键转发+置消费)：两分支各以
+// lea rcx,[rsp+disp];call 调它一次，取出现≥2 次的 call 目标。
+static void* find_raw_key_forward(const resolver::ModRange& r, uintptr_t hke) {
+    if (!hke) return nullptr;
+    const uint8_t* p0 = (const uint8_t*)hke;
+    const uint8_t* end = p0 + 0x680;
+    if ((uintptr_t)end > r.text_end) end = (const uint8_t*)r.text_end;
+    std::map<uintptr_t, int> tally;
+    bool argReady = false; int gap = 0;
+    for (const uint8_t* q = p0; q < end; ) {
+        xd::Insn i = xd::decode(q);
+        if (!i.len) { ++q; argReady = false; continue; }
+        bool leaRcxRsp = i.opcode == 0x8D && !i.two_byte && i.has_modrm && i.reg == 1 && !i.rex_r
+                      && !i.rip_rel && i.has_sib && i.sib_base == 4 && i.sib_index == 4 && !i.rex_b && !i.rex_x;
+        if (leaRcxRsp) { argReady = true; gap = 0; }
+        else if (argReady && i.opcode == 0xE8 && !i.two_byte && i.has_rel) {
+            uintptr_t tgt = xd::rel_target(q, i);
+            if (tgt >= r.text_beg && tgt < r.text_end) tally[tgt]++;
+            argReady = false;
+        }
+        else if (argReady && ++gap > 1) argReady = false;
+        q += i.len;
+    }
+    uintptr_t best = 0; int bestc = 0;
+    for (auto& kv : tally) if (kv.second > bestc) { best = kv.first; bestc = kv.second; }
+    return bestc >= 2 ? (void*)best : nullptr;
+}
+
+static bool g_vmwDerived = false;
+static void derive_vmw_off(void* thiz, const void* devidQs) {
+    std::wstring want = read_qstring(devidQs);
+    if (want.empty()) return;
+    for (uintptr_t off = 0x100; off <= 0x400; off += 8)
+        if (read_qstring((char*)thiz + off) == want) {
+            VMW_DEVICE_ID_OFF = off;
+            VMW_TITLE_OFF     = off + 8;
+            g_vmwOffAuto = true;
+            uu_log("vmw offsets auto-derived: devid=+%llu title=+%llu",
+                   (unsigned long long)off, (unsigned long long)(off + 8));
+            return;
+        }
+    uu_log("vmw offsets auto-derive missed, keep table devid=+%llu", (unsigned long long)VMW_DEVICE_ID_OFF);
+}
+
 static SessState& sessOf(void* ccs) {
     auto it = g_sessions.find(ccs);
     if (it != g_sessions.end()) return it->second;
     SessState s;
-    s.viewOnly   = cfg::g_viewOnly.load();   // 新会话默认值
+    s.viewOnly   = cfg::g_viewOnly.load();
     s.clipSync   = cfg::g_clipSync.load();
     s.gamepadOff = cfg::g_gamepadOff.load();
-    s.devid       = read_device_id(ccs);       // 用于去重
-    s.name        = s.devid;                    // 回退显示名，随后由窗口标题覆盖
-    s.lastNameTick= 0;
+    s.devid       = read_device_id(ccs);
     uu_log("session new: ccs=%p devid=%ls viewOnly=%d", ccs, s.devid.c_str(), (int)s.viewOnly);
     return g_sessions.emplace(ccs, std::move(s)).first->second;
 }
-// 输入 hook 用：记录活动会话，返回该会话是否仅浏览。
-// 设备名取自前台窗口标题（UU 把视频窗口标题设成了设备名），每秒最多抓一次。
-// 抓标题不能在持锁时做：同进程窗口的 GetWindowText 会同步发 WM_GETTEXT 回 UI 线程，
-// 持锁期间跑宿主代码有重入死锁风险。所以锁内只标记活动会话，锁外读标题，再短暂回锁写回。
 static bool input_viewOnly(void* ccs) {
-    bool vo, wantName = false;
-    {
-        std::lock_guard<std::mutex> lk(g_smtx);
-        g_activeCCS = ccs;
-        SessState& s = sessOf(ccs);
-        vo = s.viewOnly;
-        DWORD now = GetTickCount();
-        if (now - s.lastNameTick >= 1000) { s.lastNameTick = now; wantName = true; }
-    }
-    if (wantName) {
-        HWND fg = GetForegroundWindow();
-        DWORD pid = 0;
-        if (fg) GetWindowThreadProcessId(fg, &pid);
-        wchar_t t[128];
-        int n = (fg && pid == GetCurrentProcessId()) ? GetWindowTextW(fg, t, 128) : 0;  // 只认本进程窗口
-        if (n > 0) {
-            std::lock_guard<std::mutex> lk(g_smtx);
-            auto it = g_sessions.find(ccs);
-            if (it != g_sessions.end()) it->second.name.assign(t, n);
-        }
-    }
-    return vo;
+    std::lock_guard<std::mutex> lk(g_smtx);
+    g_activeCCS = ccs;
+    return sessOf(ccs).viewOnly;
 }
 static bool active_viewOnly() {
     std::lock_guard<std::mutex> lk(g_smtx);
     if (!g_activeCCS) return cfg::g_viewOnly.load();
     return sessOf(g_activeCCS).viewOnly;
 }
-static bool active_clipSync() {
+static bool clip_allowed_locked(void* clip) {
+    if (!clip) {
+        if (g_activeCCS) return sessOf(g_activeCCS).clipSync;
+        return true;
+    }
+    if (!g_activeCCS) {
+        g_serverClip = clip;
+        g_clipToCcs.erase(clip);
+    }
+    if (clip == g_serverClip) return cfg::g_ctrlClip.load() && !cfg::g_srvViewOnly.load();
+    auto it = g_clipToCcs.find(clip);
+    void* ccs = (it != g_clipToCcs.end()) ? it->second : nullptr;
+    if (!ccs && g_activeCCS) { g_clipToCcs[clip] = g_activeCCS; ccs = g_activeCCS; }
+    if (ccs) { auto s = g_sessions.find(ccs); if (s != g_sessions.end()) return s->second.clipSync; }
+    return true;
+}
+static bool clip_allowed(void* clip) {
     std::lock_guard<std::mutex> lk(g_smtx);
-    if (!g_activeCCS) return cfg::g_clipSync.load();
-    return sessOf(g_activeCCS).clipSync;
+    return clip_allowed_locked(clip);
 }
 static bool active_gpBlock() {
     std::lock_guard<std::mutex> lk(g_smtx);
@@ -123,7 +228,6 @@ static bool active_gpBlock() {
     return s.viewOnly || s.gamepadOff;
 }
 
-// 仅浏览：拦掉输入发送
 static void* __fastcall h_sendMouse(void* a1, void* a2, void* a3, void* a4, void* a5, void* a6, void* a7, void* a8) {
     if (input_viewOnly(a1)) return nullptr;
     return o_sendMouse(a1, a2, a3, a4, a5, a6, a7, a8);
@@ -136,35 +240,46 @@ static void* __fastcall h_sendKey(void* a1, void* a2, void* a3, void* a4, void* 
     if (input_viewOnly(a1)) return nullptr;
     return o_sendKey(a1, a2, a3, a4, a5, a6, a7, a8);
 }
-// 仅浏览时别让它锁鼠标，把 enable 当成 0
 static void __fastcall h_enableCapture(void* thiz, unsigned __int8 enable, char toast, char a4) {
-    if (active_viewOnly()) enable = 0;
+    if (active_viewOnly()) enable = 0;   // 仅浏览：不进捕获
     o_enableCapture(thiz, enable, toast, a4);
 }
 
-// 剪贴板。出向 on_clipboard_update 挡掉就不外推本地剪贴板。
-// 入向不能掐整个分发器(handle_clipboard_request)——那是请求/应答，掐了对端握手会卡死、
-// 把没补丁的对端剪贴板搞坏。只钝化 do_handle_format_list_request 这个落地点：关同步时
-// 不让它 EmptyClipboard+装延迟渲染桩，分发器照常把 FormatListResponse 应答给对端。
-static void __fastcall h_clipUpdate(void* thiz) {
-    if (!active_clipSync()) return;
-    o_clipUpdate(thiz);
+// sub_1406A8120：handleKeyEvent 里普通键"转发+置消费"的分支，ctx[4] 是消费标志。
+// 仅浏览时置 0 且不转发 → 键落回本机 OS(Alt+Tab 生效)；UU 快捷键不经此，不受影响。
+using fn_rawfwd_t = void*(__fastcall*)(void**, void*, void*, void*);
+static fn_rawfwd_t o_rawKeyForward = nullptr;
+static void* __fastcall h_rawKeyForward(void** ctx, void* a2, void* a3, void* a4) {
+    if (active_viewOnly()) {
+        if (ctx) { auto* consume = (unsigned char*)ctx[4]; if (consume) *consume = 0; }
+        return ctx ? (void*)ctx[4] : nullptr;
+    }
+    return o_rawKeyForward(ctx, a2, a3, a4);
 }
-// 出向格式表通告。主控剪贴板一变就枚举本地格式发给对端，对端据此 EmptyClipboard+装延迟渲染桩。
-// 这是主控主动发的(非应答)，关同步时直接不发，对端剪贴板就不会被清空。
+
+static void __fastcall h_clipUpdate(void* thiz) {
+    if (!clip_allowed(thiz)) return;
+    void* prev = t_curClip; t_curClip = thiz;
+    o_clipUpdate(thiz);
+    t_curClip = prev;
+}
 static __int64 __fastcall h_clipSendFmt(void* thiz) {
-    if (!active_clipSync()) return 0;
+    if (!clip_allowed(thiz)) return 0;
     return o_clipSendFmt(thiz);
 }
 static __int64 __fastcall h_clipFmtList(void* thiz, void* a2, void* a3) {
-    if (!active_clipSync()) return 0;
+    if (!clip_allowed(thiz)) return 0;
     return o_clipFmtList(thiz, a2, a3);
 }
-// 出向数据服务点。对端粘贴时来拉主控剪贴板，最终经 get_clipboard_data 读本地剪贴板应答。
-// 关同步时把输出 std::string 置空、返回失败——等同剪贴板为空(app 的正常分支)，对端拿到空、
-// 不卡，且本地剪贴板没被读出去。out 是 MSVC std::string：[0..15]SSO/指针 [16]size [24]cap。
+static __int64 __fastcall h_clipReq(void* thiz, void* a2, void* a3) {
+    void* prev = t_curClip; t_curClip = thiz;
+    __int64 r = o_clipReq(thiz, a2, a3);
+    t_curClip = prev;
+    return r;
+}
+// out is MSVC std::string: [0..15]SSO/ptr [16]size [24]cap
 static __int64 __fastcall h_clipGet(void* hwnd, unsigned int fmt, void* out) {
-    if (!active_clipSync()) {
+    if (!clip_allowed(t_curClip)) {
         if (out) {
             size_t* s = (size_t*)out;
             char* buf = s[3] >= 0x10 ? *(char**)out : (char*)out;
@@ -176,12 +291,9 @@ static __int64 __fastcall h_clipGet(void* hwnd, unsigned int fmt, void* out) {
     return o_clipGet(hwnd, fmt, out);
 }
 
-// 手柄
 static std::mutex        g_gpMtx;
 static void*             g_gpMgr = nullptr;
-static std::set<uint8_t> g_desired;          // 物理存在的手柄索引
-// 切换仅浏览/禁手柄时，把已连手柄在被控端拔掉或重连。
-// 先在锁内把实例和索引拷出来，解锁后再调原始函数——不在锁里跑宿主代码。
+static std::set<uint8_t> g_desired;
 static void gp_reconcile(bool block) {
     void* mgr; std::vector<uint8_t> ids;
     {
@@ -211,17 +323,37 @@ static void __fastcall h_gamepadUpdate(void* thiz, void* padState) {
     o_gamepadUpdate(thiz, padState);
 }
 
-// 给托盘菜单用，声明在 session.h
+static __int64 __fastcall h_vmwCtor(void* thiz, void* devidQs, void* a3, void* sp, int a5, __int64 a6) {
+    __int64 r = o_vmwCtor(thiz, devidQs, a3, sp, a5, a6);
+    if (!g_vmwDerived) { g_vmwDerived = true; derive_vmw_off(thiz, devidQs); }
+    std::wstring devid = read_qstring((char*)thiz + VMW_DEVICE_ID_OFF);
+    if (!devid.empty()) {
+        std::lock_guard<std::mutex> lk(g_smtx);
+        g_devidToVmw[devid] = thiz;
+        uu_log("vmw registered: devid=%ls vmw=%p", devid.c_str(), thiz);
+    }
+    return r;
+}
+
 std::vector<SessSnap> sessions_snapshot() {
     std::lock_guard<std::mutex> lk(g_smtx);
     std::vector<SessSnap> v;
     for (auto& kv : g_sessions) {
-        const std::wstring& disp = !kv.second.name.empty() ? kv.second.name : kv.second.devid;
+        std::wstring disp = kv.second.devid;
+        auto it = g_devidToVmw.find(kv.second.devid);
+        if (!kv.second.devid.empty() && it != g_devidToVmw.end()) {
+            void* vmw = it->second;
+            std::wstring vd = read_qstring((char*)vmw + VMW_DEVICE_ID_OFF);
+            if (vd == kv.second.devid) {
+                std::wstring title = read_qstring((char*)vmw + VMW_TITLE_OFF);
+                if (!title.empty()) disp = title;
+            }
+        }
         v.push_back({ kv.first, disp, kv.second.viewOnly, kv.second.clipSync, kv.second.gamepadOff });
     }
     return v;
 }
-// field: 0=viewOnly 1=clipSync 2=gamepadOff ; 返回切换后的值
+// field: 0=viewOnly 1=clipSync 2=gamepadOff
 bool session_toggle(void* key, int field) {
     bool nv = false; bool doGpReconcile = false; bool block = false;
     {
@@ -233,30 +365,36 @@ bool session_toggle(void* key, int field) {
         else if (field == 1) { s.clipSync = !s.clipSync; nv = s.clipSync; }
         else { s.gamepadOff = !s.gamepadOff; nv = s.gamepadOff; doGpReconcile = true; block = s.viewOnly || s.gamepadOff; }
     }
-    if (field == 0 && nv) ClipCursor(nullptr);   // 立即释放鼠标
+    if (field == 0 && nv) ClipCursor(nullptr);
     if (doGpReconcile) gp_reconcile(block);
     uu_log("session_toggle key=%p field=%d -> %d", key, field, (int)nv);
     return nv;
 }
 
-// 会话注册/移除。UU 断开时不销毁 CCS（留着重连），所以不能 hook 析构，只能 hook 关闭和退出。
 using fn4_t = __int64(__fastcall*)(void*, void*, void*, void*);
 static fn4_t o_setConnInfo = nullptr, o_closeConn = nullptr, o_exitRoom = nullptr;
 
 static void session_remove(void* ccs) {
     std::lock_guard<std::mutex> lk(g_smtx);
-    if (g_sessions.erase(ccs)) uu_log("session remove: ccs=%p", ccs);
+    auto it = g_sessions.find(ccs);
+    if (it != g_sessions.end()) {
+        if (!it->second.devid.empty()) g_devidToVmw.erase(it->second.devid);
+        g_sessions.erase(it);
+        uu_log("session remove: ccs=%p", ccs);
+    }
     if (g_activeCCS == ccs) g_activeCCS = nullptr;
+    for (auto jt = g_clipToCcs.begin(); jt != g_clipToCcs.end(); )
+        jt = (jt->second == ccs) ? g_clipToCcs.erase(jt) : std::next(jt);
 }
 static __int64 __fastcall h_setConnInfo(void* ccs, void* a2, void* a3, void* a4) {
     {
         std::lock_guard<std::mutex> lk(g_smtx);
         std::wstring devid = read_device_id(ccs);
-        if (!devid.empty())  // 去重：移除同设备的旧(stale)会话
+        if (!devid.empty())
             for (auto it = g_sessions.begin(); it != g_sessions.end(); )
                 it = (it->first != ccs && it->second.devid == devid) ? g_sessions.erase(it) : std::next(it);
         g_activeCCS = ccs;
-        sessOf(ccs);   // 注册+置活动(名字待首次操作时由窗口标题抓取)
+        sessOf(ccs);
     }
     return o_setConnInfo(ccs, a2, a3, a4);
 }
@@ -269,182 +407,77 @@ static __int64 __fastcall h_exitRoom(void* ccs, void* a2, void* a3, void* a4) {
     return o_exitRoom(ccs, a2, a3, a4);
 }
 
-// 仅浏览时把光标显示成禁用图标，同时挡掉远端光标同步
 using fn_curs_t = __int64(__fastcall*)(void*, unsigned int);
 static fn_curs_t o_updateCursor = nullptr;
 static __int64 __fastcall h_updateCursor(void* vw, unsigned int force) {
     if (active_viewOnly()) {
-        SetCursor(LoadCursorW(nullptr, (LPCWSTR)IDC_NO));  // 禁用标志，且不应用远端光标
+        SetCursor(LoadCursorW(nullptr, (LPCWSTR)IDC_NO));
         return 1;
     }
     return o_updateCursor(vw, force);
 }
 
-// 被控时主控解锁：
-//   isControlled() 虚函数返回 true 时，UI 会禁用"连接"按钮，且 startRemoteAssist
-//   点击后会直接 minimize 并跳过主控入口。
-// 策略：hook isControlled() 始终返回 false，使按钮保持可用、主控正常启动。
-// 安装时机：
-//   1. install_hooks 时用版本表里的全局单例 RVA 立即尝试（覆盖按钮禁用场景）；
-//   2. 首次点击"连接"（h_startRemoteAssist）时懒初始化兜底（版本未知或全局未就绪）。
-
-// 被控（inbound）状态缓存：由 h_isCtrlCheck 实时更新。
-static std::atomic<bool> g_isControlled{false};
-// isControlled() 相关：提前声明供 h_initDevStatus 引用，定义在下方
-using fn_is_ctrl_t = bool (__fastcall*)(void*);
-static fn_is_ctrl_t o_isCtrlCheck   = nullptr;
-static void*        g_isCtrlObj     = nullptr;
-static uintptr_t    g_isCtrlGlobRva = 0;  // 保存供 h_initDevStatus 懒初始化重试
-static bool         g_isCtrlGlobalDirect = false;
-static bool         g_isCtrlMemberEmbedded = false;
-static bool         g_isCtrlHookDone = false;
-// 前向声明，定义在下方
-static bool __fastcall h_isCtrlCheck(void* thiz);
-// g_gvBase 定义在下方（debug 区域），此处先声明
-extern uintptr_t g_gvBase;
-
-// 辅助：调用 widget->vtable[11](0/1) 隐藏或显示 widget
-static void vtable11_call(void* widget, int show) {
-    if (!widget) return;
-    __try {
-        void* vtbl = *(void**)widget;
-        using fn_t = void(__fastcall*)(void*, int);
-        ((fn_t)(*(void**)((char*)vtbl + 0x58)))(widget, show);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {}
-}
-static void vtable11_hide(void* widget) { vtable11_call(widget, 0); }
-static void vtable11_show(void* widget) { vtable11_call(widget, 1); }
-
-// initDeviceStatus 在被控时会走禁用路径：
-//   [rsi+0x130]/[rsi+0x138] 的叠加层被显示(vtable[11](1))，[rsi+0x30] 被置 3。
-// 原函数返回后检查：若设备本身可控（status 正常 + controllable 标志非零）
-// 却被设成禁用态，说明是被控导致——还原叠加层和状态，使"进入桌面"按钮恢复可用。
-using fn_initDevStatus_t = void(__fastcall*)(void*, void*);
-static fn_initDevStatus_t o_initDevStatus = nullptr;
-static void __fastcall h_initDevStatus(void* thiz, void* data) {
-    // 顺带懒初始化 isControlled() hook（供 startRemoteAssist 使用）
-    if (!g_isCtrlHookDone && g_isCtrlGlobRva && g_gvBase) {
-        __try {
-            void* mgr = *(void**)(g_gvBase + g_isCtrlGlobRva);
-            if (mgr) {
-                void* nested = g_isCtrlGlobalDirect ? mgr
-                             : g_isCtrlMemberEmbedded ? (void*)((char*)mgr + 0x30)
-                                                      : *(void**)((char*)mgr + 0x30);
-                if (nested) {
-                    void* fn = (*(void***)nested)[0x140 / 8];
-                    if (fn && MH_CreateHook(fn, (void*)h_isCtrlCheck, (void**)&o_isCtrlCheck) == MH_OK
-                           && MH_EnableHook(fn) == MH_OK) {
-                        g_isCtrlObj = nested;
-                        g_isCtrlHookDone = true;
-                        uu_log("isCtrlCheck lazy-retry @ %p (ok)", fn);
-                    }
-                }
-            }
-        } __except (EXCEPTION_EXECUTE_HANDLER) {}
-    }
-    o_initDevStatus(thiz, data);
-    // [thiz+0x108] 为 0 说明走了禁用路径（checkDeviceControllable 返回了 false）。
-    // 这里只在确实观察到被控痕迹时做恢复，避免无 inbound 时把正常的禁用态也改写掉。
-    if (*(unsigned char*)((char*)thiz + 0x108) != 0) return;
-    __try {
-        if (!data) return;
-        void* dev = *(void**)data;   // 设备数据对象（data 是 DeviceData**）
-        if (!dev) return;
-        // status ∈ {3,4,5,6}：设备确实不可用（离线/忙/更新中）— 不干预
-        if (((unsigned int)*(int*)((char*)dev + 0x28) - 3u) <= 3u) return;
-        // [dev+0x48] controllable 标志为 0：平台限制，不干预
-        if (*(unsigned char*)((char*)dev + 0x48) == 0) return;
-        // 设备状态正常且标志可控，但走了禁用路径 → 只恢复已确认的进入桌面控件与可控状态位。
-        uu_log("initDevStatus: restore enabled (inbound)");
-        void* enterDesktop = *(void**)((char*)thiz + 0x110);
-        vtable11_show(enterDesktop);                   // 显示进入桌面区域
-        *(int*)((char*)thiz + 0x30) = 0;               // 清除禁用状态
-        *(char*)((char*)thiz + 0x108) = 1;             // 可控标志
-        *(char*)((char*)thiz + 0x50) = 1;              // 可控标志
-        o_initDevStatus(thiz, data);                   // 让原始状态机再跑一遍，触发自然刷新
-    } __except (EXCEPTION_EXECUTE_HANDLER) {}
-}
-
-// checkDeviceControllable hook：orig=false 但 status 正常且字符串非空 → 强制 true。
-using fn_desktop_check_t = bool (__fastcall*)(void*);
-static fn_desktop_check_t o_desktopCheck = nullptr;
-static bool __fastcall h_desktopCheck(void* thiz) {
-    bool orig = o_desktopCheck(thiz);
-    if (orig) return true;
-    __try {
-        if (((unsigned int)*(int*)((char*)thiz + 0x28) - 3u) <= 3u) return false;
-        void* d = *(void**)((char*)thiz + 0x58);
-        if (!d || *(int*)((char*)d + 4) == 0) return false;
-        uu_log("desktopCheck: forced enable (inbound)");
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
-}
-
-// isControlled() 包装器 hook（fcn.140032489，thunk→0x1404e4d30）：
-//   无参数，读全局单例虚表第 40 项。被控时返回 true，让各处 UI 禁用"进入桌面"/"文件传输"。
-//   强制返回 false 使所有按钮状态恢复，覆盖 fcn.14003779a（按钮状态更新）内的被控判断。
+// 被控时仍允许本机作为主控。UI 状态统一走包装器，点击主控时还会直接调用
+// HomePageContent 内状态对象的 isControlled() 虚函数，因此两处都需要覆盖。
 using fn_isCtrlWrapper_t = bool(__fastcall*)();
 static fn_isCtrlWrapper_t o_isCtrlWrapper = nullptr;
-static bool __fastcall h_isCtrlWrapper() {
-    return false;
-}
+static fn_isCtrlWrapper_t o_isCtrlDirect = nullptr;
+static bool __fastcall h_isCtrlWrapper() { return false; }
 
 using fn_start_ra_t = void (__fastcall*)(void*);
 static fn_start_ra_t o_startRemoteAssist = nullptr;
+using fn_is_ctrl_t = bool (__fastcall*)(void*);
+static fn_is_ctrl_t o_isCtrlCheck = nullptr;
+static std::atomic<bool> g_isCtrlHookDone{false};
+static std::atomic_flag g_isCtrlHooking = ATOMIC_FLAG_INIT;
+static uintptr_t g_isCtrlMemberOff = 0;
+static bool g_isCtrlMemberEmbedded = false;
 
-static bool __fastcall h_isCtrlCheck(void* thiz) {
-    g_isControlled.store(o_isCtrlCheck(thiz), std::memory_order_relaxed);
-    return false;
-}
+static bool __fastcall h_isCtrlCheck(void*) { return false; }
 
-// 从 nested 对象虚表第 40 项取 isControlled() 并挂钩
-static bool hook_isctrl_from_nested(void* nested) {
-    if (!nested) return false;
-    void* fn = (*(void***)nested)[0x140 / 8];
-    if (!fn) return false;
-    if (MH_CreateHook(fn, (void*)h_isCtrlCheck, (void**)&o_isCtrlCheck) != MH_OK) return false;
-    if (MH_EnableHook(fn) != MH_OK) return false;
-    g_isCtrlObj = nested;
-    g_isCtrlHookDone = true;
-    uu_log("isCtrlCheck @ %p (ok)", fn);
-    return true;
-}
-
-// 立即尝试：通过版本表中的全局单例 RVA 定位嵌套对象
-static bool try_hook_isctrl_eager(uintptr_t base, uintptr_t globalRva, bool direct) {
-    if (!globalRva) return false;
+static bool hook_isctrl_from_home(void* home) {
+    if (!home || !g_isCtrlMemberOff) return false;
+    if (g_isCtrlHookDone.load(std::memory_order_acquire)) return true;
+    if (g_isCtrlHooking.test_and_set(std::memory_order_acquire))
+        return g_isCtrlHookDone.load(std::memory_order_acquire);
+    bool ok = false;
     __try {
-        void* mgr = *(void**)(base + globalRva);
-        if (!mgr) return false;
-        void* nested = direct ? mgr
-                 : g_isCtrlMemberEmbedded ? (void*)((char*)mgr + 0x30)
-                              : *(void**)((char*)mgr + 0x30);
-        return hook_isctrl_from_nested(nested);
+        void* member = (char*)home + g_isCtrlMemberOff;
+        void* state = g_isCtrlMemberEmbedded
+                    ? member
+                    : *(void**)member;
+        void* target = state ? (*(void***)state)[0x140 / sizeof(void*)] : nullptr;
+        if (target && MH_CreateHook(target, (void*)h_isCtrlCheck, (void**)&o_isCtrlCheck) == MH_OK) {
+            if (MH_EnableHook(target) == MH_OK) {
+                g_isCtrlHookDone.store(true, std::memory_order_release);
+                uu_log("isControlled virtual @ %p (ok)", target);
+                ok = true;
+            } else {
+                MH_RemoveHook(target);
+            }
+        }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        uu_log("try_hook_isctrl_eager: access violation");
-        return false;
+        uu_log("isControlled virtual: access violation");
     }
+    g_isCtrlHooking.clear(std::memory_order_release);
+    return ok;
 }
 
 static void __fastcall h_startRemoteAssist(void* thiz) {
-    // 兜底懒初始化：若 install_hooks 时全局未就绪，首次点击时从 thiz 取嵌套对象
-    if (!g_isCtrlHookDone) {
-        __try {
-            void* nested = g_isCtrlMemberEmbedded
-                         ? (void*)((char*)thiz + 0x30)
-                         : *(void**)((char*)thiz + 0x30);
-            if (!hook_isctrl_from_nested(nested))
-                uu_log("isCtrlCheck lazy-hook: failed");
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            uu_log("isCtrlCheck lazy-hook: access violation");
-        }
-    }
+    if (!hook_isctrl_from_home(thiz)) uu_log("isControlled virtual hook failed");
     o_startRemoteAssist(thiz);
 }
 
-static bool g_verKnown = false;   // 当前 GameViewer 版本号是否在 offsets 表里
+// 仅浏览时不让光标被锁进视频窗口。游戏相对模式会持续 ClipCursor 锁回，故须 hook 持续拦，而非一次释放。
+using fn_clip_t = BOOL(WINAPI*)(const RECT*);
+static fn_clip_t o_ClipCursor = nullptr;
+static BOOL WINAPI h_ClipCursor(const RECT* rc) {
+    if (rc && active_viewOnly()) return o_ClipCursor(nullptr);
+    return o_ClipCursor(rc);
+}
 
-// 给托盘“调试信息”用：每个 hook 点的定位结果、模块基址、版本号
+static bool g_verKnown = false;
+
 static std::mutex g_dbgMtx;
 static std::vector<HookStat> g_hookStats;
 static std::wstring g_gvVersion = L"?";
@@ -455,28 +488,32 @@ static void record_hook(const char* name, void* addr, const char* how, bool ok) 
     g_hookStats.push_back({ name, addr, how, ok });
 }
 
-// 版本认识就先用精确 RVA（字符串只做比对校验）；版本不认识就字符串 → AOB，绝不套别的版本的 RVA。
-static bool mk(const resolver::ModRange& r, uintptr_t base, std::initializer_list<const char*> anchors,
-               const ver::Target& t, void* detour, void** orig, const char* name) {
-    uintptr_t byStr = anchors.size() ? resolver::find_func(r, anchors) : 0;
-    uintptr_t tgt = 0; const char* how = "";
-    if (g_verKnown && t.rva) {
-        tgt = base + t.rva; how = "rva";
-        if (byStr && byStr != tgt) uu_log("%s: str %p != rva %p, keep rva", name, (void*)byStr, (void*)tgt);
-        else if (!byStr) uu_log("%s: string resolve missed (更新后会失效)", name);
-    } else if (byStr) {
-        tgt = byStr; how = "str";
-    } else {
-        uintptr_t byAob = resolver::find_func_by_aob(r, t.aob);
-        if (byAob) { tgt = byAob; how = "aob"; }
+struct InProcRecorder : hookset::IRecorder {
+    void record(const char* name, void* addr, const char* how, bool ok) override {
+        record_hook(name, addr, how, ok);
     }
-    if (!tgt) { uu_log("resolve %s failed, skip", name); record_hook(name, nullptr, "", false); return false; }
-    if (MH_CreateHook((void*)tgt, detour, orig) != MH_OK) { uu_log("CreateHook %s failed", name); record_hook(name, (void*)tgt, how, false); return false; }
-    if (MH_EnableHook((void*)tgt) != MH_OK) { uu_log("EnableHook %s failed", name); record_hook(name, (void*)tgt, how, false); return false; }
-    uu_log("hooked %s @ %p (%s)", name, (void*)tgt, how);
-    record_hook(name, (void*)tgt, how, true);
-    return true;
-}
+};
+
+static const hookset::Hook kHooks[] = {
+    { "sendMouseEvent",              { "ControlConnectionSession::sendMouseEvent", "[control] mouseObj size 0", nullptr, nullptr }, (void*)h_sendMouse, (void**)&o_sendMouse },
+    { "sendMouseWheel",              { "ControlConnectionSession::sendMouseWheel", "sendMouseWheel failed, session_config_ handle invalid", nullptr, nullptr }, (void*)h_sendWheel, (void**)&o_sendWheel },
+    { "sendKeyboardEvent",           { "ControlConnectionSession::sendKeyboardEvent", nullptr, nullptr, nullptr }, (void*)h_sendKey, (void**)&o_sendKey },
+    { "enabledCaptureMouse",         { "VideoUi::VideoWidget::enabledCaptureMouse", "==== Enabled capture mouse: ", "Cursor not in rect", nullptr }, (void*)h_enableCapture, (void**)&o_enableCapture },
+    { "GamepadManager::Connect",     { "GamepadManager::Connect(), index=", "GamepadManager::Connect", nullptr, nullptr }, (void*)h_gamepadConnect, (void**)&o_gamepadConnect },
+    { "GamepadManager::Disconnect",  { "GamepadManager::Disconnect(), index=", "GamepadManager::Disconnect", nullptr, nullptr }, (void*)h_gamepadDisconnect, (void**)&o_gamepadDisconnect },
+    { "GamepadManager::Update",      { "[%d] GamepadManager::Update(), json=%s", "GamepadManager::Update", nullptr, nullptr }, (void*)h_gamepadUpdate, (void**)&o_gamepadUpdate },
+    { "on_clipboard_update",         { "Clipboard::on_clipboard_update", "Get clipboard data failed", nullptr, nullptr }, (void*)h_clipUpdate, (void**)&o_clipUpdate },
+    { "do_handle_format_list_request",{ "Clipboard::do_handle_format_list_request", "do_handle_format_list_request: is_file_transferring=true", nullptr, nullptr }, (void*)h_clipFmtList, (void**)&o_clipFmtList },
+    { "get_clipboard_data",          { "Clipboard::get_clipboard_data", "GlobalLock failed: ", nullptr, nullptr }, (void*)h_clipGet, (void**)&o_clipGet },
+    { "do_send_format_list",         { "Clipboard::do_send_format_list", "do_send_format_list: send_request failed", nullptr, nullptr }, (void*)h_clipSendFmt, (void**)&o_clipSendFmt },
+    { "handle_clipboard_request",    { "Clipboard::handle_clipboard_request", "Received auto_save_complete: total=", nullptr, nullptr }, (void*)h_clipReq, (void**)&o_clipReq },
+    { "setConnectInfo",              { "ControlConnectionSession::setConnectInfo", "startConnectOtherDevice, device_id: ", nullptr, nullptr }, (void*)h_setConnInfo, (void**)&o_setConnInfo },
+    { "closeControlConnect",         { "ControlConnectionSession::closeControlConnect", nullptr, nullptr, nullptr }, (void*)h_closeConn, (void**)&o_closeConn },
+    { "exitRoom",                    { "ControlConnectionSession::exitRoom", nullptr, nullptr, nullptr }, (void*)h_exitRoom, (void**)&o_exitRoom },
+    { "VideoMainWindow::ctor",       { "home_control_session_start: window_created, device_id=", nullptr, nullptr, nullptr }, (void*)h_vmwCtor, (void**)&o_vmwCtor },
+    { "updateCursor",                { "VideoUi::VideoWidget::updateCursor", "set cursor by id", "Default set arrow cursor", nullptr }, (void*)h_updateCursor, (void**)&o_updateCursor },
+    { "startRemoteAssist",            { "NewUi::HomePageContent::startRemoteAssist", "startRemoteAssist: self is controlled, minimize controlled window", nullptr, nullptr }, (void*)h_startRemoteAssist, (void**)&o_startRemoteAssist },
+};
 
 void install_hooks(uintptr_t base) {
     if (MH_Initialize() != MH_OK) { uu_log("MH_Initialize failed"); return; }
@@ -486,43 +523,40 @@ void install_hooks(uintptr_t base) {
     g_gvBase = base;
     g_gvVersion = vs.empty() ? L"?" : vs;
     CCS_DEVICE_ID_OFF = V.deviceIdOff;
-    g_isCtrlGlobRva = V.isCtrlGlobalRva.rva;
-    g_isCtrlGlobalDirect = V.isCtrlGlobalDirect;
+    g_isCtrlMemberOff = V.isCtrlMemberOff;
     g_isCtrlMemberEmbedded = V.isCtrlMemberEmbedded;
+    VMW_DEVICE_ID_OFF = V.vmwDevIdOff;
+    VMW_TITLE_OFF     = V.vmwTitleOff;
     uu_log("GameViewer version=%ls known=%d", vs.empty() ? L"?" : vs.c_str(), (int)g_verKnown);
     resolver::ModRange r{};
     resolver::get_ranges((HMODULE)base, r);
-    mk(r, base, {"ControlConnectionSession::sendMouseEvent", "[control] mouseObj size 0"},      V.sendMouse,    (void*)h_sendMouse, (void**)&o_sendMouse, "sendMouseEvent");
-    mk(r, base, {"ControlConnectionSession::sendMouseWheel", "sendMouseWheel failed, session_config_ handle invalid"}, V.sendWheel, (void*)h_sendWheel, (void**)&o_sendWheel, "sendMouseWheel");
-    mk(r, base, {"ControlConnectionSession::sendKeyboardEvent"}, V.sendKey, (void*)h_sendKey,   (void**)&o_sendKey,   "sendKeyboardEvent");
-    mk(r, base, {"VideoUi::VideoWidget::enabledCaptureMouse", "==== Enabled capture mouse: ", "Cursor not in rect"}, V.enableCapture, (void*)h_enableCapture, (void**)&o_enableCapture, "enabledCaptureMouse");
-    mk(r, base, {"GamepadManager::Connect(), index=", "GamepadManager::Connect"},       V.gpConnect,    (void*)h_gamepadConnect,    (void**)&o_gamepadConnect,    "GamepadManager::Connect");
-    mk(r, base, {"GamepadManager::Disconnect(), index=", "GamepadManager::Disconnect"}, V.gpDisconnect, (void*)h_gamepadDisconnect, (void**)&o_gamepadDisconnect, "GamepadManager::Disconnect");
-    mk(r, base, {"[%d] GamepadManager::Update(), json=%s", "GamepadManager::Update"},    V.gpUpdate,   (void*)h_gamepadUpdate,     (void**)&o_gamepadUpdate,     "GamepadManager::Update");
-    mk(r, base, {"Clipboard::on_clipboard_update", "Get clipboard data failed"},         V.clipUpdate, (void*)h_clipUpdate, (void**)&o_clipUpdate, "on_clipboard_update");
-    mk(r, base, {"Clipboard::do_handle_format_list_request", "do_handle_format_list_request: is_file_transferring=true"}, V.clipFmtList, (void*)h_clipFmtList, (void**)&o_clipFmtList, "do_handle_format_list_request");
-    mk(r, base, {"Clipboard::get_clipboard_data", "GlobalLock failed: "}, V.clipGet, (void*)h_clipGet, (void**)&o_clipGet, "get_clipboard_data");
-    mk(r, base, {"Clipboard::do_send_format_list", "do_send_format_list: send_request failed"}, V.clipSendFmt, (void*)h_clipSendFmt, (void**)&o_clipSendFmt, "do_send_format_list");
-    // 会话注册/移除
-    mk(r, base, {"ControlConnectionSession::setConnectInfo", "startConnectOtherDevice, device_id: "}, V.setConnInfo, (void*)h_setConnInfo, (void**)&o_setConnInfo, "setConnectInfo");
-    mk(r, base, {"ControlConnectionSession::closeControlConnect"}, V.closeConn, (void*)h_closeConn,   (void**)&o_closeConn,   "closeControlConnect");
-    mk(r, base, {"ControlConnectionSession::exitRoom"},            V.exitRoom,  (void*)h_exitRoom,    (void**)&o_exitRoom,    "exitRoom");
-    // 光标
-    mk(r, base, {"VideoUi::VideoWidget::updateCursor", "set cursor by id", "Default set arrow cursor"}, V.updateCursor, (void*)h_updateCursor, (void**)&o_updateCursor, "updateCursor");
-    // 被控时主控解锁
-    mk(r, base, {"NewUi::HomePageContent::startRemoteAssist", "startRemoteAssist: self is controlled"},
-       V.startRemoteAssist, (void*)h_startRemoteAssist, (void**)&o_startRemoteAssist, "startRemoteAssist");
-    // 被控时"进入桌面"按钮解锁：
-    //   initDeviceStatus 用于懒初始化 isControlled() hook（让 desktopCheck 能查到它）
-    //   desktopCheck (checkDeviceControllable)：被控时将 false 强制改为 true，进入启用路径
-    mk(r, base, {"Device desktop is disabled, id: "}, V.initDevStatus, (void*)h_initDevStatus, (void**)&o_initDevStatus, "initDeviceStatus");
-    mk(r, base, {}, V.desktopCheck, (void*)h_desktopCheck, (void**)&o_desktopCheck, "desktopCheck");
-    // isControlled() 包装器：强制返回 false，覆盖按钮禁用逻辑（含 文件传输/进入桌面 底部按钮）
-    mk(r, base, {}, V.isCtrlWrapper, (void*)h_isCtrlWrapper, (void**)&o_isCtrlWrapper, "isCtrlWrapper");
-    // 立即尝试挂钩 isControlled()，使"连接"按钮在被控时保持启用
-    // 若全局单例尚未就绪（返回 false），h_initDevStatus/h_startRemoteAssist 会懒初始化兜底
-    if (!try_hook_isctrl_eager(base, V.isCtrlGlobalRva.rva, V.isCtrlGlobalDirect))
-        uu_log("isCtrlCheck: eager hook deferred (global not ready or RVA unknown)");
+    {
+        uintptr_t scfn = resolver::find_func(r, {"ControlConnectionSession::setConnectInfo", "startConnectOtherDevice, device_id: "});
+        uintptr_t d = derive_off_after_str(r, scfn, "startConnectOtherDevice, device_id: ");
+        if (d) { CCS_DEVICE_ID_OFF = d; g_devIdAuto = true; }
+        uu_log("deviceIdOff: table=%llu derived=%llu use=%llu", (unsigned long long)V.deviceIdOff,
+               (unsigned long long)d, (unsigned long long)CCS_DEVICE_ID_OFF);
+    }
+    InProcRecorder rec;
+    hookset::install(r, kHooks, (int)(sizeof(kHooks) / sizeof(kHooks[0])), rec);
+    uintptr_t isCtrlWrapper = g_verKnown ? base + V.isCtrlWrapperRva : 0;
+    if (V.isCtrlWrapperRva && isCtrlWrapper >= r.text_beg && isCtrlWrapper < r.text_end)
+        hookset::install_at((void*)isCtrlWrapper, "isControlledWrapper", "rva",
+                            (void*)h_isCtrlWrapper, (void**)&o_isCtrlWrapper, rec);
+    else
+        rec.record("isControlledWrapper", nullptr, "rva", false);
+    uintptr_t isCtrlDirect = g_verKnown ? base + V.isCtrlDirectRva : 0;
+    if (V.isCtrlDirectRva && isCtrlDirect >= r.text_beg && isCtrlDirect < r.text_end)
+        hookset::install_at((void*)isCtrlDirect, "isControlledDirect", "rva",
+                            (void*)h_isCtrlWrapper, (void**)&o_isCtrlDirect, rec);
+    hookset::install_export(L"user32.dll", "LockWorkStation", (void*)h_lockWorkStation, (void**)&o_lockWorkStation, rec);
+    hookset::install_export(L"user32.dll", "ClipCursor", (void*)h_ClipCursor, (void**)&o_ClipCursor, rec);
+    {
+        uintptr_t hke = resolver::find_func(r, { "VideoUi::VideoWidget::handleKeyEvent",
+                                                 "handleKeyEvent: controller shortcut handled" });
+        void* fwd = find_raw_key_forward(r, hke);
+        hookset::install_at(fwd, "rawKeyForward", "str", (void*)h_rawKeyForward, (void**)&o_rawKeyForward, rec);
+    }
     uu_log("install_hooks done");
 }
 
@@ -531,7 +565,27 @@ DebugInfo debug_snapshot() {
     DebugInfo d;
     d.gvVersion = g_gvVersion;
     d.gvKnown = g_verKnown;
-    d.gvBase = g_gvBase;
-    d.hooks = g_hookStats;
+    d.devIdOff = CCS_DEVICE_ID_OFF;
+    d.vmwDevIdOff = VMW_DEVICE_ID_OFF;
+    d.vmwTitleOff = VMW_TITLE_OFF;
+    d.devIdAuto = g_devIdAuto;
+    d.vmwAuto = g_vmwOffAuto;
+    d.serverRunning = false;
+    for (const auto& h : g_hookStats)
+        d.hooks.push_back({ L"ctl", h.name, h.how, h.addr ? (unsigned long long)((uintptr_t)h.addr - g_gvBase) : 0, h.ok });
+    if (HANDLE sm = OpenFileMappingW(FILE_MAP_READ, FALSE, srvdbg::MAP_NAME)) {
+        if (auto* sh = (srvdbg::Shared*)MapViewOfFile(sm, FILE_MAP_READ, 0, 0, sizeof(srvdbg::Shared))) {
+            int n = (int)sh->count; if (n < 0) n = 0; if (n > srvdbg::MAX_HOOKS) n = srvdbg::MAX_HOOKS;
+            for (int i = 0; i < n; ++i) {
+                const srvdbg::Entry& e = sh->hooks[i];
+                char name[srvdbg::NAME_LEN]; lstrcpynA(name, e.name, srvdbg::NAME_LEN);
+                char how[8];                 lstrcpynA(how,  e.how,  sizeof(how));
+                d.hooks.push_back({ L"srv", std::string(name), std::string(how), e.off, e.ok != 0 });
+            }
+            d.serverRunning = true;
+            UnmapViewOfFile(sh);
+        }
+        CloseHandle(sm);
+    }
     return d;
 }
