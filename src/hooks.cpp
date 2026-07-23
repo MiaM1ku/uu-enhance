@@ -4,6 +4,7 @@
 #include <vector>
 #include <string>
 #include <mutex>
+#include <atomic>
 #include <iterator>
 #include <cstdint>
 #include "MinHook.h"
@@ -279,6 +280,168 @@ static __int64 __fastcall h_updateCursor(void* vw, unsigned int force) {
     return o_updateCursor(vw, force);
 }
 
+// 被控时主控解锁：
+//   isControlled() 虚函数返回 true 时，UI 会禁用"连接"按钮，且 startRemoteAssist
+//   点击后会直接 minimize 并跳过主控入口。
+// 策略：hook isControlled() 始终返回 false，使按钮保持可用、主控正常启动。
+// 安装时机：
+//   1. install_hooks 时用版本表里的全局单例 RVA 立即尝试（覆盖按钮禁用场景）；
+//   2. 首次点击"连接"（h_startRemoteAssist）时懒初始化兜底（版本未知或全局未就绪）。
+
+// 被控（inbound）状态缓存：由 h_isCtrlCheck 实时更新。
+static std::atomic<bool> g_isControlled{false};
+// isControlled() 相关：提前声明供 h_initDevStatus 引用，定义在下方
+using fn_is_ctrl_t = bool (__fastcall*)(void*);
+static fn_is_ctrl_t o_isCtrlCheck   = nullptr;
+static void*        g_isCtrlObj     = nullptr;
+static uintptr_t    g_isCtrlGlobRva = 0;  // 保存供 h_initDevStatus 懒初始化重试
+static bool         g_isCtrlGlobalDirect = false;
+static bool         g_isCtrlMemberEmbedded = false;
+static bool         g_isCtrlHookDone = false;
+// 前向声明，定义在下方
+static bool __fastcall h_isCtrlCheck(void* thiz);
+// g_gvBase 定义在下方（debug 区域），此处先声明
+extern uintptr_t g_gvBase;
+
+// 辅助：调用 widget->vtable[11](0/1) 隐藏或显示 widget
+static void vtable11_call(void* widget, int show) {
+    if (!widget) return;
+    __try {
+        void* vtbl = *(void**)widget;
+        using fn_t = void(__fastcall*)(void*, int);
+        ((fn_t)(*(void**)((char*)vtbl + 0x58)))(widget, show);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+static void vtable11_hide(void* widget) { vtable11_call(widget, 0); }
+static void vtable11_show(void* widget) { vtable11_call(widget, 1); }
+
+// initDeviceStatus 在被控时会走禁用路径：
+//   [rsi+0x130]/[rsi+0x138] 的叠加层被显示(vtable[11](1))，[rsi+0x30] 被置 3。
+// 原函数返回后检查：若设备本身可控（status 正常 + controllable 标志非零）
+// 却被设成禁用态，说明是被控导致——还原叠加层和状态，使"进入桌面"按钮恢复可用。
+using fn_initDevStatus_t = void(__fastcall*)(void*, void*);
+static fn_initDevStatus_t o_initDevStatus = nullptr;
+static void __fastcall h_initDevStatus(void* thiz, void* data) {
+    // 顺带懒初始化 isControlled() hook（供 startRemoteAssist 使用）
+    if (!g_isCtrlHookDone && g_isCtrlGlobRva && g_gvBase) {
+        __try {
+            void* mgr = *(void**)(g_gvBase + g_isCtrlGlobRva);
+            if (mgr) {
+                void* nested = g_isCtrlGlobalDirect ? mgr
+                             : g_isCtrlMemberEmbedded ? (void*)((char*)mgr + 0x30)
+                                                      : *(void**)((char*)mgr + 0x30);
+                if (nested) {
+                    void* fn = (*(void***)nested)[0x140 / 8];
+                    if (fn && MH_CreateHook(fn, (void*)h_isCtrlCheck, (void**)&o_isCtrlCheck) == MH_OK
+                           && MH_EnableHook(fn) == MH_OK) {
+                        g_isCtrlObj = nested;
+                        g_isCtrlHookDone = true;
+                        uu_log("isCtrlCheck lazy-retry @ %p (ok)", fn);
+                    }
+                }
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    }
+    o_initDevStatus(thiz, data);
+    // [thiz+0x108] 为 0 说明走了禁用路径（checkDeviceControllable 返回了 false）。
+    // 这里只在确实观察到被控痕迹时做恢复，避免无 inbound 时把正常的禁用态也改写掉。
+    if (*(unsigned char*)((char*)thiz + 0x108) != 0) return;
+    __try {
+        if (!data) return;
+        void* dev = *(void**)data;   // 设备数据对象（data 是 DeviceData**）
+        if (!dev) return;
+        // status ∈ {3,4,5,6}：设备确实不可用（离线/忙/更新中）— 不干预
+        if (((unsigned int)*(int*)((char*)dev + 0x28) - 3u) <= 3u) return;
+        // [dev+0x48] controllable 标志为 0：平台限制，不干预
+        if (*(unsigned char*)((char*)dev + 0x48) == 0) return;
+        // 设备状态正常且标志可控，但走了禁用路径 → 只恢复已确认的进入桌面控件与可控状态位。
+        uu_log("initDevStatus: restore enabled (inbound)");
+        void* enterDesktop = *(void**)((char*)thiz + 0x110);
+        vtable11_show(enterDesktop);                   // 显示进入桌面区域
+        *(int*)((char*)thiz + 0x30) = 0;               // 清除禁用状态
+        *(char*)((char*)thiz + 0x108) = 1;             // 可控标志
+        *(char*)((char*)thiz + 0x50) = 1;              // 可控标志
+        o_initDevStatus(thiz, data);                   // 让原始状态机再跑一遍，触发自然刷新
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+// checkDeviceControllable hook：orig=false 但 status 正常且字符串非空 → 强制 true。
+using fn_desktop_check_t = bool (__fastcall*)(void*);
+static fn_desktop_check_t o_desktopCheck = nullptr;
+static bool __fastcall h_desktopCheck(void* thiz) {
+    bool orig = o_desktopCheck(thiz);
+    if (orig) return true;
+    __try {
+        if (((unsigned int)*(int*)((char*)thiz + 0x28) - 3u) <= 3u) return false;
+        void* d = *(void**)((char*)thiz + 0x58);
+        if (!d || *(int*)((char*)d + 4) == 0) return false;
+        uu_log("desktopCheck: forced enable (inbound)");
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+// isControlled() 包装器 hook（fcn.140032489，thunk→0x1404e4d30）：
+//   无参数，读全局单例虚表第 40 项。被控时返回 true，让各处 UI 禁用"进入桌面"/"文件传输"。
+//   强制返回 false 使所有按钮状态恢复，覆盖 fcn.14003779a（按钮状态更新）内的被控判断。
+using fn_isCtrlWrapper_t = bool(__fastcall*)();
+static fn_isCtrlWrapper_t o_isCtrlWrapper = nullptr;
+static bool __fastcall h_isCtrlWrapper() {
+    return false;
+}
+
+using fn_start_ra_t = void (__fastcall*)(void*);
+static fn_start_ra_t o_startRemoteAssist = nullptr;
+
+static bool __fastcall h_isCtrlCheck(void* thiz) {
+    g_isControlled.store(o_isCtrlCheck(thiz), std::memory_order_relaxed);
+    return false;
+}
+
+// 从 nested 对象虚表第 40 项取 isControlled() 并挂钩
+static bool hook_isctrl_from_nested(void* nested) {
+    if (!nested) return false;
+    void* fn = (*(void***)nested)[0x140 / 8];
+    if (!fn) return false;
+    if (MH_CreateHook(fn, (void*)h_isCtrlCheck, (void**)&o_isCtrlCheck) != MH_OK) return false;
+    if (MH_EnableHook(fn) != MH_OK) return false;
+    g_isCtrlObj = nested;
+    g_isCtrlHookDone = true;
+    uu_log("isCtrlCheck @ %p (ok)", fn);
+    return true;
+}
+
+// 立即尝试：通过版本表中的全局单例 RVA 定位嵌套对象
+static bool try_hook_isctrl_eager(uintptr_t base, uintptr_t globalRva, bool direct) {
+    if (!globalRva) return false;
+    __try {
+        void* mgr = *(void**)(base + globalRva);
+        if (!mgr) return false;
+        void* nested = direct ? mgr
+                 : g_isCtrlMemberEmbedded ? (void*)((char*)mgr + 0x30)
+                              : *(void**)((char*)mgr + 0x30);
+        return hook_isctrl_from_nested(nested);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        uu_log("try_hook_isctrl_eager: access violation");
+        return false;
+    }
+}
+
+static void __fastcall h_startRemoteAssist(void* thiz) {
+    // 兜底懒初始化：若 install_hooks 时全局未就绪，首次点击时从 thiz 取嵌套对象
+    if (!g_isCtrlHookDone) {
+        __try {
+            void* nested = g_isCtrlMemberEmbedded
+                         ? (void*)((char*)thiz + 0x30)
+                         : *(void**)((char*)thiz + 0x30);
+            if (!hook_isctrl_from_nested(nested))
+                uu_log("isCtrlCheck lazy-hook: failed");
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            uu_log("isCtrlCheck lazy-hook: access violation");
+        }
+    }
+    o_startRemoteAssist(thiz);
+}
+
 static bool g_verKnown = false;   // 当前 GameViewer 版本号是否在 offsets 表里
 
 // 给托盘“调试信息”用：每个 hook 点的定位结果、模块基址、版本号
@@ -323,6 +486,9 @@ void install_hooks(uintptr_t base) {
     g_gvBase = base;
     g_gvVersion = vs.empty() ? L"?" : vs;
     CCS_DEVICE_ID_OFF = V.deviceIdOff;
+    g_isCtrlGlobRva = V.isCtrlGlobalRva.rva;
+    g_isCtrlGlobalDirect = V.isCtrlGlobalDirect;
+    g_isCtrlMemberEmbedded = V.isCtrlMemberEmbedded;
     uu_log("GameViewer version=%ls known=%d", vs.empty() ? L"?" : vs.c_str(), (int)g_verKnown);
     resolver::ModRange r{};
     resolver::get_ranges((HMODULE)base, r);
@@ -343,6 +509,20 @@ void install_hooks(uintptr_t base) {
     mk(r, base, {"ControlConnectionSession::exitRoom"},            V.exitRoom,  (void*)h_exitRoom,    (void**)&o_exitRoom,    "exitRoom");
     // 光标
     mk(r, base, {"VideoUi::VideoWidget::updateCursor", "set cursor by id", "Default set arrow cursor"}, V.updateCursor, (void*)h_updateCursor, (void**)&o_updateCursor, "updateCursor");
+    // 被控时主控解锁
+    mk(r, base, {"NewUi::HomePageContent::startRemoteAssist", "startRemoteAssist: self is controlled"},
+       V.startRemoteAssist, (void*)h_startRemoteAssist, (void**)&o_startRemoteAssist, "startRemoteAssist");
+    // 被控时"进入桌面"按钮解锁：
+    //   initDeviceStatus 用于懒初始化 isControlled() hook（让 desktopCheck 能查到它）
+    //   desktopCheck (checkDeviceControllable)：被控时将 false 强制改为 true，进入启用路径
+    mk(r, base, {"Device desktop is disabled, id: "}, V.initDevStatus, (void*)h_initDevStatus, (void**)&o_initDevStatus, "initDeviceStatus");
+    mk(r, base, {}, V.desktopCheck, (void*)h_desktopCheck, (void**)&o_desktopCheck, "desktopCheck");
+    // isControlled() 包装器：强制返回 false，覆盖按钮禁用逻辑（含 文件传输/进入桌面 底部按钮）
+    mk(r, base, {}, V.isCtrlWrapper, (void*)h_isCtrlWrapper, (void**)&o_isCtrlWrapper, "isCtrlWrapper");
+    // 立即尝试挂钩 isControlled()，使"连接"按钮在被控时保持启用
+    // 若全局单例尚未就绪（返回 false），h_initDevStatus/h_startRemoteAssist 会懒初始化兜底
+    if (!try_hook_isctrl_eager(base, V.isCtrlGlobalRva.rva, V.isCtrlGlobalDirect))
+        uu_log("isCtrlCheck: eager hook deferred (global not ready or RVA unknown)");
     uu_log("install_hooks done");
 }
 
