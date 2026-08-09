@@ -25,6 +25,21 @@ using fn_ev1_t    = __int64(__fastcall*)(void*);
 using fn_setpriv_t = __int64(__fastcall*)(unsigned*, unsigned, unsigned, __int64, __int64,
                                           unsigned char, unsigned char, __int64);
 
+// GameViewerServer 4.36 对输入及数个业务入口做了 ABI 重构。不能把这些入口
+// 强行套进旧版函数指针，否则参数会整体错位（GVInput 尤其会把 this 当成 count）。
+using fn_gvsend436_t = UINT(__fastcall*)(void*, UINT, void*, int, char);
+using fn_gp436_t     = void(__fastcall*)(void*, void*);
+using fn_evchar2_t   = char(__fastcall*)(void*, void*);
+using fn_evchar3_t   = char(__fastcall*)(void*, void*, void*);
+using fn_launch436_t = char(__fastcall*)(void*, unsigned int, void*);
+using fn_auto436_t   = void(__fastcall*)(void*, char);
+
+struct PixelSpan436 {
+    const void* data;
+    size_t      size;
+};
+using fn_png436_t = void*(__fastcall*)(void*, const PixelSpan436*, int, int);
+
 static fn_gvsend_t   o_gvInputSend = nullptr;
 static fn_send1_t    o_mouseSend   = nullptr;
 static fn_send1_t    o_kbdSend     = nullptr;
@@ -40,6 +55,15 @@ static fn_ev_t       o_dragPaste   = nullptr;
 static fn_ev1_t      o_micDefault  = nullptr;
 static fn_setpriv_t  o_setPrivacy  = nullptr;
 static fn_ev1_t      o_privLock    = nullptr;
+static fn_gvsend436_t o_gvInputSend436 = nullptr;
+static fn_gp436_t     o_gpUpdate436 = nullptr, o_gpConnect436 = nullptr;
+static fn_evchar2_t   o_setPrivacy436 = nullptr, o_superScreen436 = nullptr;
+static fn_evchar2_t   o_flipScreen436 = nullptr, o_wolEnable436 = nullptr;
+static fn_evchar3_t   o_pmOnFrame436 = nullptr;
+static fn_launch436_t o_launchApp436 = nullptr;
+static fn_auto436_t   o_autoRun436 = nullptr;
+static fn_gp436_t     o_notifyText436 = nullptr;
+static fn_png436_t    o_pngConv436 = nullptr;
 using fn_mute_t   = void(__fastcall*)(void*, void*);
 static fn_mute_t     o_doSetMute   = nullptr;
 using fn_mkvd_t   = __int64(__fastcall*)(void*, __int64);
@@ -79,6 +103,10 @@ static UINT __fastcall h_gvInputSend(UINT c, void* in, int cb, char a4) {
     if (cfg::srv_block(cfg::SF_INPUT)) { note_block("GVInputSend"); return c; }
     return o_gvInputSend(c, in, cb, a4);
 }
+static UINT __fastcall h_gvInputSend436(void* thiz, UINT c, void* in, int cb, char a5) {
+    if (cfg::srv_block(cfg::SF_INPUT)) { note_block("GVInputSend"); return c; }
+    return o_gvInputSend436(thiz, c, in, cb, a5);
+}
 static __int64 __fastcall h_mouseSend(void* ev) {
     if (cfg::srv_block(cfg::SF_INPUT)) { note_block("mouse"); return 0; }
     return o_mouseSend(ev);
@@ -98,6 +126,14 @@ static __int64 __fastcall h_gpUpdate(void* thiz, void* pad) {
 static __int64 __fastcall h_gpConnect(void* thiz, unsigned __int64 idx) {
     if (cfg::srv_block(cfg::SF_INPUT)) { note_block("gp_connect"); return 0; }
     return o_gpConnect(thiz, idx);
+}
+static void __fastcall h_gpUpdate436(void* thiz, void* pad) {
+    if (cfg::srv_block(cfg::SF_INPUT)) { note_block("gp_update"); return; }
+    o_gpUpdate436(thiz, pad);
+}
+static void __fastcall h_gpConnect436(void* thiz, void* idx) {
+    if (cfg::srv_block(cfg::SF_INPUT)) { note_block("gp_connect"); return; }
+    o_gpConnect436(thiz, idx);
 }
 // 吸鼠标(跨机器/对方无插件也有效)：streamer 靠 GetCursorInfo 检测光标隐藏(游戏独占鼠标时 flags=0)，隐藏就通知
 // 主控进捕获、把光标锁进窗口。仅浏览时强制 flags=可见，streamer 永远以为没隐藏 → 主控不捕获。x64dbg 实测坐实。
@@ -152,6 +188,10 @@ static __int64 __fastcall h_setPrivacy(unsigned* a1, unsigned a2, unsigned a3, _
     if (cfg::srv_block(cfg::SF_PRIVACY)) { note_block("setPrivacyMode"); return 0; }
     return o_setPrivacy(a1, a2, a3, a4, a5, a6, a7, a8);
 }
+static char __fastcall h_setPrivacy436(void* thiz, void* request) {
+    if (cfg::srv_block(cfg::SF_PRIVACY)) { note_block("setPrivacyMode"); return 0; }
+    return o_setPrivacy436(thiz, request);
+}
 static __int64 __fastcall h_privLock(void* thiz) {
     if (cfg::srv_block(cfg::SF_PRIVACY)) { note_block("onEventReqDisablePrivacyModeAndLock"); return 0; }
     return o_privLock(thiz);
@@ -167,6 +207,10 @@ static __int64 __fastcall h_mkVirtualDisp(void* thiz, __int64 req) {
 static __int64 __fastcall h_enterSuperScreen(void* thiz, int reason, int fps) {
     if (cfg::srv_block(cfg::SF_VDISPLAY)) { note_block("manualEnterSuperScreenMode"); return (unsigned int)-60; }
     return o_enterSuperScreen(thiz, reason, fps);
+}
+static char __fastcall h_enterSuperScreen436(void* thiz, void* request) {
+    if (cfg::srv_block(cfg::SF_VDISPLAY)) { note_block("manualEnterSuperScreenMode"); return 0; }
+    return o_superScreen436(thiz, request);
 }
 static __int64 __fastcall h_shutdownSystem() {
     if (cfg::srv_block(cfg::SF_POWER)) { note_block("shutdownSystem"); return 0; }
@@ -190,10 +234,18 @@ static void __fastcall h_launchApp(void* thiz, void* msg) {
     if (cfg::srv_block(cfg::SF_LAUNCH)) { note_block("handle_launch_app"); return; }
     o_launchApp(thiz, msg);
 }
+static char __fastcall h_launchApp436(void* thiz, unsigned int connection, void* msg) {
+    if (cfg::srv_block(cfg::SF_LAUNCH)) { note_block("handle_launch_app"); return 0; }
+    return o_launchApp436(thiz, connection, msg);
+}
 static fn_ev_t o_pmOnFrame = nullptr;
 static __int64 __fastcall h_pmOnFrame(void* thiz, void* frame) {
     if (cfg::srv_block(cfg::SF_PORTMAP)) { note_block("port_mapping"); return 0; }
     return o_pmOnFrame(thiz, frame);
+}
+static char __fastcall h_pmOnFrame436(void* thiz, void* frame, void* stream) {
+    if (cfg::srv_block(cfg::SF_PORTMAP)) { note_block("port_mapping"); return 0; }
+    return o_pmOnFrame436(thiz, frame, stream);
 }
 // 文本注入：handle_text_change_request → notifyReceiveText 把文本经 IPC 转发给注入器。拦转发即掐注入，
 // 返回 0 让 handler 照常回失败响应，不断会话。
@@ -201,6 +253,22 @@ static fn_ev_t o_notifyText = nullptr;
 static __int64 __fastcall h_notifyText(void* thiz, void* text) {
     if (cfg::srv_block(cfg::SF_TEXT)) { note_block("notifyReceiveText"); return 0; }
     return o_notifyText(thiz, text);
+}
+static void __fastcall h_notifyText436(void* thiz, void* text) {
+    if (cfg::srv_block(cfg::SF_TEXT)) { note_block("notifyReceiveText"); return; }
+    o_notifyText436(thiz, text);
+}
+static char __fastcall h_flipScreen436(void* thiz, void* request) {
+    if (cfg::srv_block(cfg::SF_DISPLAY)) { note_block("onEventFlipScreen"); return 0; }
+    return o_flipScreen436(thiz, request);
+}
+static void __fastcall h_autoRun436(void* thiz, char enabled) {
+    if (cfg::srv_block(cfg::SF_POWER)) { note_block("onEventReqAutoRunChange"); return; }
+    o_autoRun436(thiz, enabled);
+}
+static char __fastcall h_wolEnable436(void* thiz, void* request) {
+    if (cfg::srv_block(cfg::SF_POWER)) { note_block("onEventEnableWolSetting"); return 0; }
+    return o_wolEnable436(thiz, request);
 }
 static BOOL WINAPI h_createProcAsUser(HANDLE tok, LPCWSTR app, LPWSTR cmd, LPSECURITY_ATTRIBUTES pa,
                                       LPSECURITY_ATTRIBUTES ta, BOOL inh, DWORD flags, LPVOID env,
@@ -333,6 +401,60 @@ static const hookset::Hook kCtrlHooks[] = {
     { "onEventEnableWolSetting",            { "host::ControlledServer::onEventEnableWolSetting", nullptr, nullptr, nullptr }, (void*)h_wolEnable, (void**)&o_wolEnable },
 };
 
+struct Server436Rvas {
+    uintptr_t gvInputSend, gpUpdate, gpConnect;
+    uintptr_t setRes, setResAsync, setRef, setDpiAsync, disableMon, flipScreen;
+    uintptr_t recvFile, dragPaste, micDefault, setPrivacy, privLock, doSetMute;
+    uintptr_t mkVirtualDisp, enterSuperScreen, shutdownSystem, rebootSystem;
+    uintptr_t launchApp, createBridge, pmOnFrame, notifyText, autoRun, wolEnable;
+    uintptr_t pngConv;
+};
+
+// GameViewerServer.exe 4.36.0.9155，image base 0x140000000。
+// 所有地址及上方 4.36 专用原型均由 IDA 9.3/Hex-Rays 重新确认。
+static constexpr Server436Rvas kServer436 = {
+    0x4ec5a0, 0x515020, 0x511fe0,
+    0x225ed0, 0x225b80, 0x2252f0, 0x223b90, 0x21c3f0, 0x4b3100,
+    0x424000, 0x3f1790, 0x445d10, 0x4b1880, 0x3ca770, 0x4950b0,
+    0x4b1060, 0x4b1360, 0x430110, 0x42f2f0,
+    0x36cf20, 0x58f760, 0x573bd0, 0x50a590, 0x0e79c0, 0x43e610,
+    0xa306d0,
+};
+
+static void install_server436(uintptr_t base, SharedMemRecorder& rec) {
+    const auto at = [base, &rec](uintptr_t rva, const char* name, void* detour, void** orig) {
+        return hookset::install_at((void*)(base + rva), name, "rva436", detour, orig, rec);
+    };
+    at(kServer436.gvInputSend, "GVInputSend", (void*)h_gvInputSend436, (void**)&o_gvInputSend436);
+    at(kServer436.gpUpdate, "GamepadManagerServer::Update", (void*)h_gpUpdate436, (void**)&o_gpUpdate436);
+    at(kServer436.gpConnect, "GamepadManagerServer::connectInternal", (void*)h_gpConnect436, (void**)&o_gpConnect436);
+
+    at(kServer436.setRes, "SetMonitorResolution", (void*)h_setRes, (void**)&o_setRes);
+    at(kServer436.setResAsync, "SetMonitorResolutionAsync", (void*)h_setResAsync, (void**)&o_setResAsync);
+    at(kServer436.setRef, "SetMonitorRefreshRate", (void*)h_setRef, (void**)&o_setRef);
+    at(kServer436.setDpiAsync, "SetDpiScaleAsync", (void*)h_setDpiAsync, (void**)&o_setDpiAsync);
+    at(kServer436.disableMon, "disableMonitor", (void*)h_disableMon, (void**)&o_disableMon);
+    at(kServer436.flipScreen, "onEventFlipScreen", (void*)h_flipScreen436, (void**)&o_flipScreen436);
+
+    at(kServer436.recvFile, "onEventReceiveFile", (void*)h_recvFile, (void**)&o_recvFile);
+    at(kServer436.dragPaste, "onEventDragDropPaste", (void*)h_dragPaste, (void**)&o_dragPaste);
+    at(kServer436.micDefault, "SetMicrophoneAsDefault", (void*)h_micDefault, (void**)&o_micDefault);
+    at(kServer436.setPrivacy, "setPrivacyMode", (void*)h_setPrivacy436, (void**)&o_setPrivacy436);
+    at(kServer436.privLock, "onEventReqDisablePrivacyModeAndLock", (void*)h_privLock, (void**)&o_privLock);
+    at(kServer436.doSetMute, "do_set_mute", (void*)h_doSetMute, (void**)&o_doSetMute);
+    at(kServer436.mkVirtualDisp, "manualCreateVirtualDisplay", (void*)h_mkVirtualDisp, (void**)&o_mkVirtualDisp);
+    at(kServer436.enterSuperScreen, "manualEnterSuperScreenMode", (void*)h_enterSuperScreen436, (void**)&o_superScreen436);
+
+    at(kServer436.shutdownSystem, "shutdownSystem", (void*)h_shutdownSystem, (void**)&o_shutdownSystem);
+    at(kServer436.rebootSystem, "rebootSystem", (void*)h_rebootSystem, (void**)&o_rebootSystem);
+    at(kServer436.launchApp, "handle_launch_app", (void*)h_launchApp436, (void**)&o_launchApp436);
+    at(kServer436.createBridge, "create_bridge_process", (void*)h_createBridge, (void**)&o_createBridge);
+    at(kServer436.pmOnFrame, "PortMappingService::onFrame", (void*)h_pmOnFrame436, (void**)&o_pmOnFrame436);
+    at(kServer436.notifyText, "notifyReceiveText", (void*)h_notifyText436, (void**)&o_notifyText436);
+    at(kServer436.autoRun, "onEventReqAutoRunChange", (void*)h_autoRun436, (void**)&o_autoRun436);
+    at(kServer436.wolEnable, "onEventEnableWolSetting", (void*)h_wolEnable436, (void**)&o_wolEnable436);
+}
+
 static void publish_srv_dbg() {
     static HANDLE s_map = nullptr;
     SECURITY_ATTRIBUTES sa{ sizeof(sa), nullptr, FALSE };
@@ -366,6 +488,23 @@ static void* __fastcall h_pngConv(void* src, unsigned w, unsigned h, int* outSiz
         return o_pngConv(noSym, (unsigned)PRTS_N, (unsigned)PRTS_N, outSize);
     }
     return o_pngConv(src, w, h, outSize);
+}
+
+// 4.36: encode_png(std::string* out, PixelSpan* bgra, int width, int height)。
+// CursorShape 仍携带原始目标尺寸，主控会把替换后的 PNG 重采样到该尺寸。
+static void* __fastcall h_pngConv436(void* out, const PixelSpan436* src, int w, int h) {
+    if (cfg::srv_block(cfg::SF_INPUT)) {
+        const unsigned char* pixels = kPrts;
+        static unsigned char noSym[PRTS_N * PRTS_N * 4];
+        static bool inited = false;
+        if (!g_prts) {
+            if (!inited) { draw_no_cursor(noSym, PRTS_N, PRTS_N); inited = true; }
+            pixels = noSym;
+        }
+        const PixelSpan436 replacement{ pixels, PRTS_N * PRTS_N * 4u };
+        return o_pngConv436(out, &replacement, PRTS_N, PRTS_N);
+    }
+    return o_pngConv436(out, src, w, h);
 }
 
 // 光标状态：+0x28/+0x2C=热点X/Y，+0x30/+0x34=宽/高，成为 CursorShape。主控端热点分数=hotspotX/width。
@@ -417,19 +556,39 @@ void install_server_hooks() {
     resolver::ModRange r{};
     if (!resolver::get_ranges(base, r)) { uu_log("server: get_ranges failed"); return; }
 
-    bool hasInput = resolver::find_string(r, "gvinput failed! use SendInput instead") != 0;
-    bool hasCtrl  = resolver::find_string(r, "host::SetMonitorResolution") != 0
+    wchar_t exePath[MAX_PATH]{};
+    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    const wchar_t* exeName = wcsrchr(exePath, L'\\');
+    exeName = exeName ? exeName + 1 : exePath;
+    const std::wstring version = cfg::exe_version();
+    const bool claims436 = lstrcmpiW(exeName, L"GameViewerServer.exe") == 0
+                        && version == L"4.36.0.9155";
+    const bool is436 = claims436
+                    && r.img_end - r.img_beg == 0x1c49000
+                    && resolver::find_string(r, "gvinput_send result=failed fallback=send_input code=")
+                    && resolver::find_string(r, "privacy_screen_setting result=success requested_type=");
+    if (claims436 && !is436)
+        uu_log("server: 4.36 layout guard mismatch, refusing version-specific RVA hooks");
+    bool hasInput = is436 || resolver::find_string(r, "gvinput failed! use SendInput instead") != 0;
+    bool hasCtrl  = is436 || resolver::find_string(r, "host::SetMonitorResolution") != 0
                  || resolver::find_string(r, "host::ControlledServer::onEventReceiveFile") != 0;
     if (!hasInput && !hasCtrl) { uu_log("server: no anchors, skip (helper process)"); return; }
     if (MH_Initialize() != MH_OK) { uu_log("server: MH_Initialize failed"); return; }
 
     SharedMemRecorder rec;
-    if (hasInput) {
+    if (is436) {
+        uu_log("server: installing verified 4.36.0.9155 RVA hooks");
+        install_server436((uintptr_t)base, rec);
+    } else if (hasInput) {
         hookset::install(r, kInputHooks, (int)(sizeof(kInputHooks) / sizeof(kInputHooks[0])), rec);
+    }
+    if (!is436 && hasCtrl) {
+        hookset::install(r, kCtrlHooks, (int)(sizeof(kCtrlHooks) / sizeof(kCtrlHooks[0])), rec);
+    }
+    if (hasInput) {
         hookset::install_export(L"user32.dll", "SendInput", (void*)h_SendInput, (void**)&o_SendInput, rec);
     }
     if (hasCtrl) {
-        hookset::install(r, kCtrlHooks, (int)(sizeof(kCtrlHooks) / sizeof(kCtrlHooks[0])), rec);
         hookset::install_export(L"advapi32.dll", "InitiateSystemShutdownW",   (void*)h_initShutdown,     (void**)&o_initShutdown,     rec);
         hookset::install_export(L"advapi32.dll", "InitiateSystemShutdownExW", (void*)h_initShutdownEx,   (void**)&o_initShutdownEx,   rec);
         hookset::install_export(L"advapi32.dll", "CreateProcessAsUserW",      (void*)h_createProcAsUser, (void**)&o_createProcAsUser, rec);
@@ -438,14 +597,19 @@ void install_server_hooks() {
     uu_log("server: arknights detected = %d (cursor: %hs)", (int)g_prts, g_prts ? "prts" : "no-symbol");
     // 防锁鼠标：伪装 GetCursorInfo 始终"光标可见"(streamer 靠它判隐藏来锁鼠标)。两被控进程都装。
     hookset::install_export(L"user32.dll", "GetCursorInfo", (void*)h_GetCursorInfo, (void**)&o_GetCursorInfo, rec);
-    {
+    if (is436) {
+        bool ok = hookset::install_at((void*)((uintptr_t)base + kServer436.pngConv), "cursorPngShape",
+                                      "rva436", (void*)h_pngConv436, (void**)&o_pngConv436, rec);
+        uu_log("server: hook cursor png %hs @ %p (4.36)", ok ? "ok" : "failed",
+               (void*)((uintptr_t)base + kServer436.pngConv));
+    } else {
         uintptr_t pngfn = resolver::find_func_by_wstr(r, L"image/png");
         bool ok = pngfn && MH_CreateHook((void*)pngfn, (void*)h_pngConv, (void**)&o_pngConv) == MH_OK
                         && MH_EnableHook((void*)pngfn) == MH_OK;
         uu_log("server: hook cursor png %hs @ %p", ok ? "ok" : (pngfn ? "failed" : "not found"), (void*)pngfn);
         dbg_add("cursorPngShape", ok, "wstr", pngfn ? (pngfn - s_srvBase) : 0);
     }
-    if (o_pngConv) {   // 尺寸放大依赖 PNG hook 已装，见 h_curState
+    if (!is436 && o_pngConv) {   // 尺寸放大依赖旧版 PNG hook 已装，见 h_curState
         uintptr_t send = resolver::find_func(r, { "Failed to convert cursor shape to png." });
         uintptr_t csfn = find_cursorstate_fn(r, send);
         bool ok = csfn && MH_CreateHook((void*)csfn, (void*)h_curState, (void**)&o_curState) == MH_OK
