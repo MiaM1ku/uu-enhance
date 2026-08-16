@@ -36,6 +36,20 @@ add_library(uu_version SHARED
     ${MINHOOK_DIR}/src/trampoline.c
     ${MINHOOK_DIR}/src/hde/hde64.c
 )
+# app.h also supplies strings compiled into C++ objects. Make version/name changes
+# rebuild those objects even when the generator's header dependency cache is stale.
+set_property(SOURCE
+    src/dllmain.cpp
+    src/proxy.cpp
+    src/hooks.cpp
+    src/server.cpp
+    src/config.cpp
+    src/resolver.cpp
+    src/xdisasm.cpp
+    src/hookset.cpp
+    src/tray.cpp
+    src/update.cpp
+    APPEND PROPERTY OBJECT_DEPENDS "${CMAKE_SOURCE_DIR}/src/app.h")
 set_property(SOURCE src/app.rc PROPERTY OBJECT_DEPENDS "${CMAKE_SOURCE_DIR}/src/app.h")
 
 target_include_directories(uu_version PRIVATE
@@ -74,6 +88,8 @@ add_executable(uu_installer WIN32
     installer/installer.cpp
     installer/installer.rc
 )
+set_property(SOURCE installer/installer.cpp APPEND PROPERTY OBJECT_DEPENDS
+    "${CMAKE_SOURCE_DIR}/src/app.h")
 set_property(SOURCE installer/installer.rc PROPERTY OBJECT_DEPENDS
     "${CMAKE_SOURCE_DIR}/src/app.h;${PAYLOAD_DIR}/version.dll")
 add_dependencies(uu_installer uu_payload)
