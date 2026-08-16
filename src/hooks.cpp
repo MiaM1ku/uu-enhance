@@ -32,9 +32,12 @@ using fn_vmwctor_t= __int64(__fastcall*)(void* thiz, void* devidQs, void* a3, vo
 using fn_vmwctor436_t = __int64(__fastcall*)(void* thiz, void* devidQs, void* coverQs, int mode, __int64 parent);
 using fn_vmwclose436_t = char(__fastcall*)(void* thiz, void* event);
 using fn_vmwdtor436_t = void(__fastcall*)(void* thiz);
+using fn_vwclose436_t = void(__fastcall*)(void* thiz);
 using fn_capture436_t = char(__fastcall*)(void* thiz, const char* source);
 
 static fn_send_t    o_sendMouse = nullptr, o_sendWheel = nullptr, o_sendKey = nullptr;
+static fn_send_t    o_inputKey = nullptr, o_inputMouse = nullptr;
+static fn_send_t    o_inputWheel = nullptr, o_inputMouseContent = nullptr;
 static fn_cap_t     o_enableCapture = nullptr;
 static fn_clipupd_t o_clipUpdate = nullptr;
 static fn_fmtlist_t o_clipFmtList = nullptr;
@@ -47,6 +50,7 @@ static fn_vmwctor_t o_vmwCtor = nullptr;
 static fn_vmwctor436_t o_vmwCtor436 = nullptr;
 static fn_vmwclose436_t o_vmwClose436 = nullptr;
 static fn_vmwdtor436_t o_vmwDtor436 = nullptr;
+static fn_vwclose436_t o_vwClose436 = nullptr;
 static fn_capture436_t o_capture436 = nullptr;
 
 using fn_lock_t = BOOL(WINAPI*)(void);
@@ -62,6 +66,7 @@ static uintptr_t VMW_TITLE_OFF     = 352;
 static uintptr_t ISCTRL_VT_SLOT_OFF = 0x140;
 static bool      g_devIdAuto  = false;
 static bool      g_vmwOffAuto = false;
+static bool      g_sessionKeyIsVideoWidget = false;
 
 struct SessState { bool viewOnly; bool clipSync; bool gamepadOff; std::wstring devid; };
 static std::mutex                 g_smtx;
@@ -74,6 +79,9 @@ static std::map<std::wstring, std::wstring> g_devidToTitle;
 static void*                      g_serverClip = nullptr;
 static std::map<void*, void*>     g_clipToCcs;
 static thread_local void*         t_curClip = nullptr;
+static thread_local void*         t_inputVideoWidget = nullptr;
+
+static std::wstring read_qstring(const void* qsHolder);
 
 static int safe_copy_devid(void* ccs, char* buf, int bufsz) {
     __try {
@@ -87,6 +95,9 @@ static int safe_copy_devid(void* ccs, char* buf, int bufsz) {
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
 static std::wstring read_device_id(void* ccs) {
+    if (!ccs) return L"";
+    if (g_sessionKeyIsVideoWidget)
+        return read_qstring((char*)ccs + CCS_DEVICE_ID_OFF);
     char buf[129];
     int len = safe_copy_devid(ccs, buf, sizeof(buf));
     if (len <= 0) return L"";
@@ -247,6 +258,13 @@ static SessState& sessOf(void* ccs) {
 }
 static bool input_viewOnly(void* ccs) {
     std::lock_guard<std::mutex> lk(g_smtx);
+    if (g_sessionKeyIsVideoWidget) {
+        ccs = t_inputVideoWidget;
+        if (!ccs) {
+            if (!g_activeCCS) return cfg::g_viewOnly.load();
+            return sessOf(g_activeCCS).viewOnly;
+        }
+    }
     g_activeCCS = ccs;
     return sessOf(ccs).viewOnly;
 }
@@ -297,6 +315,41 @@ static void* __fastcall h_sendKey(void* a1, void* a2, void* a3, void* a4, void* 
 static void __fastcall h_enableCapture(void* thiz, unsigned __int8 enable, char toast, char a4) {
     if (active_viewOnly()) enable = 0;   // 仅浏览：不进捕获
     o_enableCapture(thiz, enable, toast, a4);
+}
+struct InputWidgetScope {
+    void* prev;
+    explicit InputWidgetScope(void* videoWidget) : prev(t_inputVideoWidget) {
+        t_inputVideoWidget = videoWidget;
+    }
+    ~InputWidgetScope() { t_inputVideoWidget = prev; }
+};
+
+static void* __fastcall h_inputKey(void* a1, void* a2, void* a3, void* a4, void* a5, void* a6, void* a7, void* a8) {
+    InputWidgetScope scope(a1);
+    return o_inputKey(a1, a2, a3, a4, a5, a6, a7, a8);
+}
+static void* __fastcall h_inputMouse(void* a1, void* a2, void* a3, void* a4, void* a5, void* a6, void* a7, void* a8) {
+    InputWidgetScope scope(a1);
+    return o_inputMouse(a1, a2, a3, a4, a5, a6, a7, a8);
+}
+static void* __fastcall h_inputWheel(void* a1, void* a2, void* a3, void* a4, void* a5, void* a6, void* a7, void* a8) {
+    InputWidgetScope scope(a1);
+    return o_inputWheel(a1, a2, a3, a4, a5, a6, a7, a8);
+}
+static void* video_widget_from_content(void* content) {
+    void* videoWidget = nullptr;
+    __try {
+        // 4.37 VideoContentWindow::video_widget_ is at +0x100.
+        if (content) videoWidget = *(void**)((char*)content + 0x100);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        videoWidget = nullptr;
+    }
+    return videoWidget;
+}
+static void* __fastcall h_inputMouseContent(void* a1, void* a2, void* a3, void* a4, void* a5, void* a6, void* a7, void* a8) {
+    void* videoWidget = video_widget_from_content(a1);
+    InputWidgetScope scope(videoWidget);
+    return o_inputMouseContent(a1, a2, a3, a4, a5, a6, a7, a8);
 }
 
 // 4.36 的 enabledCaptureMouse 已拆成 captureMouse(source)，不再接收 enable/toast。
@@ -416,7 +469,7 @@ static __int64 __fastcall h_vmwCtor(void* thiz, void* devidQs, void* a3, void* s
 
 static __int64 __fastcall h_vmwCtor436(void* thiz, void* devidQs, void* coverQs, int mode, __int64 parent) {
     // 4.36 构造函数的第三个 QString 是桌面封面图 URL，不是会话名称。
-    // 真正的标题在连接完成时写入 VideoMainWindow + 0x1E8，快照时从该字段读取。
+    // 真正的标题在连接完成时写入版本表指定的 VMW_TITLE_OFF，快照时从该字段读取。
     std::wstring ctorDevid = read_qstring(devidQs);
     __int64 r = o_vmwCtor436(thiz, devidQs, coverQs, mode, parent);
     std::wstring devid = std::move(ctorDevid);
@@ -472,6 +525,14 @@ static char __fastcall h_vmwClose436(void* thiz, void* event) {
 static void __fastcall h_vmwDtor436(void* thiz) {
     session_remove_vmw436(thiz, "window_destroyed");
     o_vmwDtor436(thiz);
+}
+
+static void __fastcall h_vwClose436(void* thiz) {
+    {
+        std::lock_guard<std::mutex> lk(g_smtx);
+        session_remove_locked(thiz, "video_disconnected");
+    }
+    o_vwClose436(thiz);
 }
 
 std::vector<SessSnap> sessions_snapshot() {
@@ -646,44 +707,49 @@ static bool __fastcall h_isCtrlNarrow436(void* thiz) {
     return o_isCtrlNarrow436(thiz);
 }
 
-// DeviceDesktopScene::render(DeviceDetailViewData const&) 同时检查：
-//   data+0x69 当前设备允许控制；data+0x6a 本机正被控制。
-// 仅置 0x69=1 仍会被第二项判为禁用。只在同步渲染期间临时改成“允许且未被控”，
-// 不改共享设备模型，也不影响被控窗口的收起状态。
+// DeviceDesktopScene::render(DeviceDetailViewData const&) 在 4.37 分别用两组字段控制
+// “进入桌面”区域和快捷操作按钮。只在同步渲染期间临时改成“允许且未被控”，
+// 返回后恢复原值，不改共享设备模型，也不影响被控窗口的收起状态。
 using fn_device_scene_render436_t = void(__fastcall*)(void*, unsigned char*);
 static fn_device_scene_render436_t o_deviceSceneRender436 = nullptr;
-static uintptr_t g_deviceControlAllowedOff436 = 0;
-static uintptr_t g_deviceControlledOff436 = 0;
+static uintptr_t g_deviceDesktopAllowedOff436 = 0;
+static uintptr_t g_deviceDesktopControlledOff436 = 0;
+static uintptr_t g_deviceActionAllowedOff436 = 0;
+static uintptr_t g_deviceActionControlledOff436 = 0;
 static void __fastcall h_deviceSceneRender436(void* scene, unsigned char* data) {
-    unsigned char* allowed = nullptr;
-    unsigned char* controlled = nullptr;
-    unsigned char savedAllowed = 0;
-    unsigned char savedControlled = 0;
+    struct SavedFlag {
+        unsigned char* ptr;
+        unsigned char value;
+    } saved[4]{};
+    size_t savedCount = 0;
     __try {
-        if (data && g_deviceControlAllowedOff436 && g_deviceControlledOff436) {
+        if (data && g_deviceDesktopAllowedOff436 && g_deviceDesktopControlledOff436) {
             const unsigned int platform = *(unsigned int*)(data + 0x60);
             if (platform == 1 || platform == 4) {
-                allowed = data + g_deviceControlAllowedOff436;
-                controlled = data + g_deviceControlledOff436;
-                savedAllowed = *allowed;
-                savedControlled = *controlled;
-                *allowed = 1;
-                *controlled = 0;
+                auto overrideFlag = [&](uintptr_t off, unsigned char value) {
+                    if (!off) return;
+                    unsigned char* ptr = data + off;
+                    saved[savedCount++] = { ptr, *ptr };
+                    *ptr = value;
+                };
+                overrideFlag(g_deviceDesktopAllowedOff436, 1);
+                overrideFlag(g_deviceDesktopControlledOff436, 0);
+                overrideFlag(g_deviceActionAllowedOff436, 1);
+                overrideFlag(g_deviceActionControlledOff436, 0);
             }
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        allowed = nullptr;
-        controlled = nullptr;
+        savedCount = 0;
     }
 
     o_deviceSceneRender436(scene, data);
 
-    if (allowed && controlled) {
-        __try {
-            *allowed = savedAllowed;
-            *controlled = savedControlled;
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
+    __try {
+        while (savedCount) {
+            --savedCount;
+            *saved[savedCount].ptr = saved[savedCount].value;
         }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
 }
 
@@ -734,9 +800,9 @@ static const hookset::Hook kLegacyHooks[] = {
     { "startRemoteAssist",            { "NewUi::HomePageContent::startRemoteAssist", "startRemoteAssist: self is controlled, minimize controlled window", nullptr, nullptr }, (void*)h_startRemoteAssist, (void**)&o_startRemoteAssist },
 };
 
-// 4.36 删除了绝大多数“类名::方法名”日志，并重构了数个函数原型。
-// 这里只保留经 4.36.0.9155 反编译确认过、原型仍与 detour 一致的入口。
-static const hookset::Hook k436Hooks[] = {
+// 4.36+ 删除了绝大多数“类名::方法名”日志，并重构了数个函数原型。
+// 这里只保留经对应版本反编译确认过、原型仍与 detour 一致的入口。
+static const hookset::Hook kModernHooks[] = {
     { "GamepadManager::Connect",      { "gamepad_connection result=connected count=", nullptr, nullptr, nullptr }, (void*)h_gamepadConnect, (void**)&o_gamepadConnect },
     { "GamepadManager::Disconnect",   { "gamepad_connection result=disconnected count=", nullptr, nullptr, nullptr }, (void*)h_gamepadDisconnect, (void**)&o_gamepadDisconnect },
     { "on_clipboard_update",          { "clipboard_update result=forwarded role=", nullptr, nullptr, nullptr }, (void*)h_clipUpdate, (void**)&o_clipUpdate },
@@ -754,7 +820,7 @@ void install_hooks(uintptr_t base) {
     g_verKnown = (!vs.empty() && vs == V.version);
     g_gvBase = base;
     g_gvVersion = vs.empty() ? L"?" : vs;
-    const bool claims436 = g_verKnown && vs == L"4.36.0.9155";
+    const bool claimsModern = g_verKnown && V.imageSize != 0;
     CCS_DEVICE_ID_OFF = V.deviceIdOff;
     g_isCtrlMemberOff = V.isCtrlMemberOff;
     g_isCtrlMemberEmbedded = V.isCtrlMemberEmbedded;
@@ -764,38 +830,51 @@ void install_hooks(uintptr_t base) {
     uu_log("GameViewer version=%ls known=%d", vs.empty() ? L"?" : vs.c_str(), (int)g_verKnown);
     resolver::ModRange r{};
     resolver::get_ranges((HMODULE)base, r);
-    const bool is436 = claims436
-                    && r.img_end - r.img_beg == 0x412c000
-                    && resolver::find_string(r, "clipboard_update result=forwarded role=")
-                    && resolver::find_string(r, "startRemoteAssist: device data is not init, return");
-    if (claims436 && !is436) {
-        uu_log("GameViewer: 4.36 layout guard mismatch, refusing version-specific RVA hooks");
+    const bool isModern = claimsModern
+                       && r.img_end - r.img_beg == V.imageSize
+                       && resolver::find_string(r, "clipboard_update result=forwarded role=")
+                       && resolver::find_string(r, "startRemoteAssist: device data is not init, return");
+    g_sessionKeyIsVideoWidget = isModern && V.videoWidgetCloseRva != 0;
+    if (claimsModern && !isModern) {
+        uu_log("GameViewer: modern layout guard mismatch, refusing version-specific RVA hooks");
         return;
     }
-    if (!is436) {
+    if (!isModern) {
         uintptr_t scfn = resolver::find_func(r, {"ControlConnectionSession::setConnectInfo", "startConnectOtherDevice, device_id: "});
         uintptr_t d = derive_off_after_str(r, scfn, "startConnectOtherDevice, device_id: ");
         if (d) { CCS_DEVICE_ID_OFF = d; g_devIdAuto = true; }
         uu_log("deviceIdOff: table=%llu derived=%llu use=%llu", (unsigned long long)V.deviceIdOff,
                (unsigned long long)d, (unsigned long long)CCS_DEVICE_ID_OFF);
     } else {
-        uu_log("deviceIdOff: 4.36 table=%llu (verified from VideoModel methods)",
-               (unsigned long long)CCS_DEVICE_ID_OFF);
+        uu_log("deviceIdOff: modern table=%llu layout=%s",
+               (unsigned long long)CCS_DEVICE_ID_OFF,
+               g_sessionKeyIsVideoWidget ? "VideoWidget/QString" : "presenter/std::string");
     }
     InProcRecorder rec;
-    if (is436)
-        hookset::install(r, k436Hooks, (int)(sizeof(k436Hooks) / sizeof(k436Hooks[0])), rec);
+    if (isModern)
+        hookset::install(r, kModernHooks, (int)(sizeof(kModernHooks) / sizeof(kModernHooks[0])), rec);
     else
         hookset::install(r, kLegacyHooks, (int)(sizeof(kLegacyHooks) / sizeof(kLegacyHooks[0])), rec);
-    // 4.36+：输入发送改为会话级包装函数（vtable 槽 thunk → jmp 存根 → 包装）。
-    //   这些包装函数无字符串锚点，只能按已知版本 RVA 安装；a1=session。
+    // 4.36+ 底层输入发送入口无字符串锚点，只能按已知版本 RVA 安装。
+    // 4.37 的上层 Hook 只向这里传递 VideoWidget 上下文；输入仍在此处阻断，
+    // 保留原程序上层函数的事件收尾逻辑。
     //   旧版本 send*Rva=0，走上面的字符串锚点解析。
     if (g_verKnown && (V.sendKeyRva || V.sendMouseRva || V.sendWheelRva)) {
         if (V.sendKeyRva)   hookset::install_at((void*)(base + V.sendKeyRva),   "sendKeyboardEvent", "rva", (void*)h_sendKey,   (void**)&o_sendKey,   rec);
         if (V.sendMouseRva) hookset::install_at((void*)(base + V.sendMouseRva), "sendMouseEvent",    "rva", (void*)h_sendMouse, (void**)&o_sendMouse, rec);
         if (V.sendWheelRva) hookset::install_at((void*)(base + V.sendWheelRva), "sendMouseWheel",    "rva", (void*)h_sendWheel, (void**)&o_sendWheel, rec);
     }
-    if (is436) {
+    if (g_verKnown && V.inputKeyRva) {
+        hookset::install_at((void*)(base + V.inputKeyRva), "inputKeyContext", "rva",
+                            (void*)h_inputKey, (void**)&o_inputKey, rec);
+        hookset::install_at((void*)(base + V.inputMouseRva), "inputMouseContext", "rva",
+                            (void*)h_inputMouse, (void**)&o_inputMouse, rec);
+        hookset::install_at((void*)(base + V.inputWheelRva), "inputWheelContext", "rva",
+                            (void*)h_inputWheel, (void**)&o_inputWheel, rec);
+        hookset::install_at((void*)(base + V.inputMouseContentRva), "inputMouseContentContext", "rva",
+                            (void*)h_inputMouseContent, (void**)&o_inputMouseContent, rec);
+    }
+    if (isModern) {
         hookset::install_at((void*)(base + V.captureMouseRva), "captureMouse", "rva",
                             (void*)h_capture436, (void**)&o_capture436, rec);
         hookset::install_at((void*)(base + V.clipGetRva), "get_clipboard_data", "rva",
@@ -806,14 +885,19 @@ void install_hooks(uintptr_t base) {
         g_isCtrlGuardRet436 = base + V.isCtrlGuardRetRva;
         hookset::install_at((void*)(base + V.isCtrlNarrowRva), "isControlledConnectOnly", "rva",
                             (void*)h_isCtrlNarrow436, (void**)&o_isCtrlNarrow436, rec);
-        g_deviceControlAllowedOff436 = V.deviceControlAllowedOff;
-        g_deviceControlledOff436 = V.deviceControlledOff;
+        g_deviceDesktopAllowedOff436 = V.deviceDesktopAllowedOff;
+        g_deviceDesktopControlledOff436 = V.deviceDesktopControlledOff;
+        g_deviceActionAllowedOff436 = V.deviceActionAllowedOff;
+        g_deviceActionControlledOff436 = V.deviceActionControlledOff;
         hookset::install_at((void*)(base + V.deviceSceneRenderRva), "deviceDesktopControlAllowed", "rva",
                             (void*)h_deviceSceneRender436, (void**)&o_deviceSceneRender436, rec);
         hookset::install_at((void*)(base + V.vmwCloseEventRva), "VideoMainWindow::closeEvent", "rva",
                             (void*)h_vmwClose436, (void**)&o_vmwClose436, rec);
         hookset::install_at((void*)(base + V.vmwDtorRva), "VideoMainWindow::~VideoMainWindow", "rva",
                             (void*)h_vmwDtor436, (void**)&o_vmwDtor436, rec);
+        if (V.videoWidgetCloseRva)
+            hookset::install_at((void*)(base + V.videoWidgetCloseRva), "VideoWidget::close", "rva",
+                                (void*)h_vwClose436, (void**)&o_vwClose436, rec);
     }
     uintptr_t isCtrlWrapper = g_verKnown ? base + V.isCtrlWrapperRva : 0;
     if (V.isCtrlWrapperRva && isCtrlWrapper >= r.text_beg && isCtrlWrapper < r.text_end)
@@ -827,7 +911,7 @@ void install_hooks(uintptr_t base) {
                             (void*)h_isCtrlWrapper, (void**)&o_isCtrlDirect, rec);
     hookset::install_export(L"user32.dll", "LockWorkStation", (void*)h_lockWorkStation, (void**)&o_lockWorkStation, rec);
     hookset::install_export(L"user32.dll", "ClipCursor", (void*)h_ClipCursor, (void**)&o_ClipCursor, rec);
-    if (!is436) {
+    if (!isModern) {
         uintptr_t hke = resolver::find_func(r, { "VideoUi::VideoWidget::handleKeyEvent",
                                                  "handleKeyEvent: controller shortcut handled" });
         void* fwd = find_raw_key_forward(r, hke);

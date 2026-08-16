@@ -11,6 +11,7 @@ add_compile_options(/utf-8)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")
 
 # 从 app.h 取版本号(唯一定义处)，用于安装器产物名
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/src/app.h")
 file(READ ${CMAKE_SOURCE_DIR}/src/app.h _APP_H)
 string(REGEX MATCH "UURE_VERSION[ \t]+\"([^\"]+)\"" _ "${_APP_H}")
 set(UURE_VER "${CMAKE_MATCH_1}")
@@ -35,6 +36,7 @@ add_library(uu_version SHARED
     ${MINHOOK_DIR}/src/trampoline.c
     ${MINHOOK_DIR}/src/hde/hde64.c
 )
+set_property(SOURCE src/app.rc PROPERTY OBJECT_DEPENDS "${CMAKE_SOURCE_DIR}/src/app.h")
 
 target_include_directories(uu_version PRIVATE
     ${MINHOOK_DIR}/include
@@ -72,6 +74,8 @@ add_executable(uu_installer WIN32
     installer/installer.cpp
     installer/installer.rc
 )
+set_property(SOURCE installer/installer.rc PROPERTY OBJECT_DEPENDS
+    "${CMAKE_SOURCE_DIR}/src/app.h;${PAYLOAD_DIR}/version.dll")
 add_dependencies(uu_installer uu_payload)
 
 # rc 在 PAYLOAD_DIR 里找 version.dll; src 里找 app.h(共用版本号/GitHub)

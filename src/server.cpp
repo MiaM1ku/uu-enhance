@@ -33,6 +33,7 @@ using fn_evchar2_t   = char(__fastcall*)(void*, void*);
 using fn_evchar3_t   = char(__fastcall*)(void*, void*, void*);
 using fn_launch436_t = char(__fastcall*)(void*, unsigned int, void*);
 using fn_auto436_t   = void(__fastcall*)(void*, char);
+using fn_recv437_t   = void(__fastcall*)(void*, void*, void*);
 
 struct PixelSpan436 {
     const void* data;
@@ -64,6 +65,7 @@ static fn_launch436_t o_launchApp436 = nullptr;
 static fn_auto436_t   o_autoRun436 = nullptr;
 static fn_gp436_t     o_notifyText436 = nullptr;
 static fn_png436_t    o_pngConv436 = nullptr;
+static fn_recv437_t   o_recvFile437 = nullptr;
 using fn_mute_t   = void(__fastcall*)(void*, void*);
 static fn_mute_t     o_doSetMute   = nullptr;
 using fn_mkvd_t   = __int64(__fastcall*)(void*, __int64);
@@ -174,6 +176,11 @@ static void __fastcall h_flipScreen(void* a1, void* a2) {   // onEventFlipScreen
 static __int64 __fastcall h_recvFile(void* thiz, void* msg) {
     if (cfg::srv_block(cfg::SF_FILE)) { note_block("onEventReceiveFile"); return 0; }
     return o_recvFile(thiz, msg);
+}
+// 4.37 把接收文件入口移到 receive task manager，并新增第三个参数。
+static void __fastcall h_recvFile437(void* thiz, void* task, void* context) {
+    if (cfg::srv_block(cfg::SF_FILE)) { note_block("createReceiveTask"); return; }
+    o_recvFile437(thiz, task, context);
 }
 static __int64 __fastcall h_dragPaste(void* thiz, void* msg) {
     if (cfg::srv_block(cfg::SF_FILE)) { note_block("onEventDragDropPaste"); return 0; }
@@ -401,7 +408,10 @@ static const hookset::Hook kCtrlHooks[] = {
     { "onEventEnableWolSetting",            { "host::ControlledServer::onEventEnableWolSetting", nullptr, nullptr, nullptr }, (void*)h_wolEnable, (void**)&o_wolEnable },
 };
 
-struct Server436Rvas {
+struct ServerModernRvas {
+    const wchar_t* version;
+    uintptr_t imageSize;
+    bool recvFileThreeArg;
     uintptr_t gvInputSend, gpUpdate, gpConnect;
     uintptr_t setRes, setResAsync, setRef, setDpiAsync, disableMon, flipScreen;
     uintptr_t recvFile, dragPaste, micDefault, setPrivacy, privLock, doSetMute;
@@ -410,49 +420,67 @@ struct Server436Rvas {
     uintptr_t pngConv;
 };
 
-// GameViewerServer.exe 4.36.0.9155，image base 0x140000000。
-// 所有地址及上方 4.36 专用原型均由 IDA 9.3/Hex-Rays 重新确认。
-static constexpr Server436Rvas kServer436 = {
+// GameViewerServer.exe，image base 0x140000000。所有地址和现代版专用原型
+// 均由 IDA/Hex-Rays 按对应版本重新确认，不能按版本差值平移。
+static constexpr ServerModernRvas kServerModern[] = {
+  { L"4.37.0.9232", 0x1c4b000, true,
+    0x4ecb50, 0x515570, 0x512530,
+    0x225f70, 0x225c20, 0x225390, 0x223c30, 0x21c490, 0x4b3550,
+    0x5ae0f0, 0x3f1ad0, 0x445ab0, 0x4b1cd0, 0x3ca800, 0x494e50,
+    0x4b14b0, 0x4b17b0, 0x42feb0, 0x42f090,
+    0x36cfc0, 0x58fc90, 0x574100, 0x3f3710, 0x0e79c0, 0x43e3b0,
+    0xa30d70 },
+  { L"4.36.0.9155", 0x1c49000, false,
     0x4ec5a0, 0x515020, 0x511fe0,
     0x225ed0, 0x225b80, 0x2252f0, 0x223b90, 0x21c3f0, 0x4b3100,
     0x424000, 0x3f1790, 0x445d10, 0x4b1880, 0x3ca770, 0x4950b0,
     0x4b1060, 0x4b1360, 0x430110, 0x42f2f0,
     0x36cf20, 0x58f760, 0x573bd0, 0x50a590, 0x0e79c0, 0x43e610,
-    0xa306d0,
+    0xa306d0 },
 };
 
-static void install_server436(uintptr_t base, SharedMemRecorder& rec) {
+static const ServerModernRvas* find_server_modern(const std::wstring& version) {
+    for (const auto& rvas : kServerModern)
+        if (version == rvas.version) return &rvas;
+    return nullptr;
+}
+
+static void install_server_modern(uintptr_t base, const ServerModernRvas& rvas,
+                                  SharedMemRecorder& rec) {
     const auto at = [base, &rec](uintptr_t rva, const char* name, void* detour, void** orig) {
-        return hookset::install_at((void*)(base + rva), name, "rva436", detour, orig, rec);
+        return hookset::install_at((void*)(base + rva), name, "rvaModern", detour, orig, rec);
     };
-    at(kServer436.gvInputSend, "GVInputSend", (void*)h_gvInputSend436, (void**)&o_gvInputSend436);
-    at(kServer436.gpUpdate, "GamepadManagerServer::Update", (void*)h_gpUpdate436, (void**)&o_gpUpdate436);
-    at(kServer436.gpConnect, "GamepadManagerServer::connectInternal", (void*)h_gpConnect436, (void**)&o_gpConnect436);
+    at(rvas.gvInputSend, "GVInputSend", (void*)h_gvInputSend436, (void**)&o_gvInputSend436);
+    at(rvas.gpUpdate, "GamepadManagerServer::Update", (void*)h_gpUpdate436, (void**)&o_gpUpdate436);
+    at(rvas.gpConnect, "GamepadManagerServer::connectInternal", (void*)h_gpConnect436, (void**)&o_gpConnect436);
 
-    at(kServer436.setRes, "SetMonitorResolution", (void*)h_setRes, (void**)&o_setRes);
-    at(kServer436.setResAsync, "SetMonitorResolutionAsync", (void*)h_setResAsync, (void**)&o_setResAsync);
-    at(kServer436.setRef, "SetMonitorRefreshRate", (void*)h_setRef, (void**)&o_setRef);
-    at(kServer436.setDpiAsync, "SetDpiScaleAsync", (void*)h_setDpiAsync, (void**)&o_setDpiAsync);
-    at(kServer436.disableMon, "disableMonitor", (void*)h_disableMon, (void**)&o_disableMon);
-    at(kServer436.flipScreen, "onEventFlipScreen", (void*)h_flipScreen436, (void**)&o_flipScreen436);
+    at(rvas.setRes, "SetMonitorResolution", (void*)h_setRes, (void**)&o_setRes);
+    at(rvas.setResAsync, "SetMonitorResolutionAsync", (void*)h_setResAsync, (void**)&o_setResAsync);
+    at(rvas.setRef, "SetMonitorRefreshRate", (void*)h_setRef, (void**)&o_setRef);
+    at(rvas.setDpiAsync, "SetDpiScaleAsync", (void*)h_setDpiAsync, (void**)&o_setDpiAsync);
+    at(rvas.disableMon, "disableMonitor", (void*)h_disableMon, (void**)&o_disableMon);
+    at(rvas.flipScreen, "onEventFlipScreen", (void*)h_flipScreen436, (void**)&o_flipScreen436);
 
-    at(kServer436.recvFile, "onEventReceiveFile", (void*)h_recvFile, (void**)&o_recvFile);
-    at(kServer436.dragPaste, "onEventDragDropPaste", (void*)h_dragPaste, (void**)&o_dragPaste);
-    at(kServer436.micDefault, "SetMicrophoneAsDefault", (void*)h_micDefault, (void**)&o_micDefault);
-    at(kServer436.setPrivacy, "setPrivacyMode", (void*)h_setPrivacy436, (void**)&o_setPrivacy436);
-    at(kServer436.privLock, "onEventReqDisablePrivacyModeAndLock", (void*)h_privLock, (void**)&o_privLock);
-    at(kServer436.doSetMute, "do_set_mute", (void*)h_doSetMute, (void**)&o_doSetMute);
-    at(kServer436.mkVirtualDisp, "manualCreateVirtualDisplay", (void*)h_mkVirtualDisp, (void**)&o_mkVirtualDisp);
-    at(kServer436.enterSuperScreen, "manualEnterSuperScreenMode", (void*)h_enterSuperScreen436, (void**)&o_superScreen436);
+    if (rvas.recvFileThreeArg)
+        at(rvas.recvFile, "onEventReceiveFile", (void*)h_recvFile437, (void**)&o_recvFile437);
+    else
+        at(rvas.recvFile, "onEventReceiveFile", (void*)h_recvFile, (void**)&o_recvFile);
+    at(rvas.dragPaste, "onEventDragDropPaste", (void*)h_dragPaste, (void**)&o_dragPaste);
+    at(rvas.micDefault, "SetMicrophoneAsDefault", (void*)h_micDefault, (void**)&o_micDefault);
+    at(rvas.setPrivacy, "setPrivacyMode", (void*)h_setPrivacy436, (void**)&o_setPrivacy436);
+    at(rvas.privLock, "onEventReqDisablePrivacyModeAndLock", (void*)h_privLock, (void**)&o_privLock);
+    at(rvas.doSetMute, "do_set_mute", (void*)h_doSetMute, (void**)&o_doSetMute);
+    at(rvas.mkVirtualDisp, "manualCreateVirtualDisplay", (void*)h_mkVirtualDisp, (void**)&o_mkVirtualDisp);
+    at(rvas.enterSuperScreen, "manualEnterSuperScreenMode", (void*)h_enterSuperScreen436, (void**)&o_superScreen436);
 
-    at(kServer436.shutdownSystem, "shutdownSystem", (void*)h_shutdownSystem, (void**)&o_shutdownSystem);
-    at(kServer436.rebootSystem, "rebootSystem", (void*)h_rebootSystem, (void**)&o_rebootSystem);
-    at(kServer436.launchApp, "handle_launch_app", (void*)h_launchApp436, (void**)&o_launchApp436);
-    at(kServer436.createBridge, "create_bridge_process", (void*)h_createBridge, (void**)&o_createBridge);
-    at(kServer436.pmOnFrame, "PortMappingService::onFrame", (void*)h_pmOnFrame436, (void**)&o_pmOnFrame436);
-    at(kServer436.notifyText, "notifyReceiveText", (void*)h_notifyText436, (void**)&o_notifyText436);
-    at(kServer436.autoRun, "onEventReqAutoRunChange", (void*)h_autoRun436, (void**)&o_autoRun436);
-    at(kServer436.wolEnable, "onEventEnableWolSetting", (void*)h_wolEnable436, (void**)&o_wolEnable436);
+    at(rvas.shutdownSystem, "shutdownSystem", (void*)h_shutdownSystem, (void**)&o_shutdownSystem);
+    at(rvas.rebootSystem, "rebootSystem", (void*)h_rebootSystem, (void**)&o_rebootSystem);
+    at(rvas.launchApp, "handle_launch_app", (void*)h_launchApp436, (void**)&o_launchApp436);
+    at(rvas.createBridge, "create_bridge_process", (void*)h_createBridge, (void**)&o_createBridge);
+    at(rvas.pmOnFrame, "PortMappingService::onFrame", (void*)h_pmOnFrame436, (void**)&o_pmOnFrame436);
+    at(rvas.notifyText, "notifyReceiveText", (void*)h_notifyText436, (void**)&o_notifyText436);
+    at(rvas.autoRun, "onEventReqAutoRunChange", (void*)h_autoRun436, (void**)&o_autoRun436);
+    at(rvas.wolEnable, "onEventEnableWolSetting", (void*)h_wolEnable436, (void**)&o_wolEnable436);
 }
 
 static void publish_srv_dbg() {
@@ -561,28 +589,31 @@ void install_server_hooks() {
     const wchar_t* exeName = wcsrchr(exePath, L'\\');
     exeName = exeName ? exeName + 1 : exePath;
     const std::wstring version = cfg::exe_version();
-    const bool claims436 = lstrcmpiW(exeName, L"GameViewerServer.exe") == 0
-                        && version == L"4.36.0.9155";
-    const bool is436 = claims436
-                    && r.img_end - r.img_beg == 0x1c49000
-                    && resolver::find_string(r, "gvinput_send result=failed fallback=send_input code=")
-                    && resolver::find_string(r, "privacy_screen_setting result=success requested_type=");
-    if (claims436 && !is436)
-        uu_log("server: 4.36 layout guard mismatch, refusing version-specific RVA hooks");
-    bool hasInput = is436 || resolver::find_string(r, "gvinput failed! use SendInput instead") != 0;
-    bool hasCtrl  = is436 || resolver::find_string(r, "host::SetMonitorResolution") != 0
-                 || resolver::find_string(r, "host::ControlledServer::onEventReceiveFile") != 0;
+    const ServerModernRvas* modern = lstrcmpiW(exeName, L"GameViewerServer.exe") == 0
+                                   ? find_server_modern(version) : nullptr;
+    const bool claimsModern = modern != nullptr;
+    const bool isModern = claimsModern
+                       && r.img_end - r.img_beg == modern->imageSize
+                       && resolver::find_string(r, "gvinput_send result=failed fallback=send_input code=")
+                       && resolver::find_string(r, "privacy_screen_setting result=success requested_type=");
+    if (claimsModern && !isModern) {
+        uu_log("server: modern layout guard mismatch, refusing version-specific RVA hooks");
+        return;
+    }
+    bool hasInput = isModern || resolver::find_string(r, "gvinput failed! use SendInput instead") != 0;
+    bool hasCtrl  = isModern || resolver::find_string(r, "host::SetMonitorResolution") != 0
+                  || resolver::find_string(r, "host::ControlledServer::onEventReceiveFile") != 0;
     if (!hasInput && !hasCtrl) { uu_log("server: no anchors, skip (helper process)"); return; }
     if (MH_Initialize() != MH_OK) { uu_log("server: MH_Initialize failed"); return; }
 
     SharedMemRecorder rec;
-    if (is436) {
-        uu_log("server: installing verified 4.36.0.9155 RVA hooks");
-        install_server436((uintptr_t)base, rec);
+    if (isModern) {
+        uu_log("server: installing verified %ls RVA hooks", modern->version);
+        install_server_modern((uintptr_t)base, *modern, rec);
     } else if (hasInput) {
         hookset::install(r, kInputHooks, (int)(sizeof(kInputHooks) / sizeof(kInputHooks[0])), rec);
     }
-    if (!is436 && hasCtrl) {
+    if (!isModern && hasCtrl) {
         hookset::install(r, kCtrlHooks, (int)(sizeof(kCtrlHooks) / sizeof(kCtrlHooks[0])), rec);
     }
     if (hasInput) {
@@ -597,11 +628,11 @@ void install_server_hooks() {
     uu_log("server: arknights detected = %d (cursor: %hs)", (int)g_prts, g_prts ? "prts" : "no-symbol");
     // 防锁鼠标：伪装 GetCursorInfo 始终"光标可见"(streamer 靠它判隐藏来锁鼠标)。两被控进程都装。
     hookset::install_export(L"user32.dll", "GetCursorInfo", (void*)h_GetCursorInfo, (void**)&o_GetCursorInfo, rec);
-    if (is436) {
-        bool ok = hookset::install_at((void*)((uintptr_t)base + kServer436.pngConv), "cursorPngShape",
-                                      "rva436", (void*)h_pngConv436, (void**)&o_pngConv436, rec);
-        uu_log("server: hook cursor png %hs @ %p (4.36)", ok ? "ok" : "failed",
-               (void*)((uintptr_t)base + kServer436.pngConv));
+    if (isModern) {
+        bool ok = hookset::install_at((void*)((uintptr_t)base + modern->pngConv), "cursorPngShape",
+                                      "rvaModern", (void*)h_pngConv436, (void**)&o_pngConv436, rec);
+        uu_log("server: hook cursor png %hs @ %p (%ls)", ok ? "ok" : "failed",
+               (void*)((uintptr_t)base + modern->pngConv), modern->version);
     } else {
         uintptr_t pngfn = resolver::find_func_by_wstr(r, L"image/png");
         bool ok = pngfn && MH_CreateHook((void*)pngfn, (void*)h_pngConv, (void**)&o_pngConv) == MH_OK
@@ -609,7 +640,7 @@ void install_server_hooks() {
         uu_log("server: hook cursor png %hs @ %p", ok ? "ok" : (pngfn ? "failed" : "not found"), (void*)pngfn);
         dbg_add("cursorPngShape", ok, "wstr", pngfn ? (pngfn - s_srvBase) : 0);
     }
-    if (!is436 && o_pngConv) {   // 尺寸放大依赖旧版 PNG hook 已装，见 h_curState
+    if (!isModern && o_pngConv) {   // 尺寸放大依赖旧版 PNG hook 已装，见 h_curState
         uintptr_t send = resolver::find_func(r, { "Failed to convert cursor shape to png." });
         uintptr_t csfn = find_cursorstate_fn(r, send);
         bool ok = csfn && MH_CreateHook((void*)csfn, (void*)h_curState, (void**)&o_curState) == MH_OK
