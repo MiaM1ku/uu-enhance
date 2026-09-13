@@ -15,17 +15,16 @@ struct VerSet {
     uintptr_t isCtrlConnectRetRva, isCtrlGuardRetRva;
     // DeviceDesktopScene::render(DeviceDetailViewData const&)
     uintptr_t deviceSceneRenderRva;
-    // 4.40 进入桌面区域：platform 在 +0x60；+0x69 或 +0x90 非 0 则不出「进入桌面」。
-    uintptr_t deviceDesktopBlockOff, deviceActionBlockOff;
+    // DeviceDetailViewData：platform 在 +0x60。
+    // desktopAllowed=1 才不会画「该设备不允许被控」；desktopControlled=1 会藏进入桌面按钮。
+    uintptr_t deviceDesktopAllowedOff, deviceDesktopControlledOff;
+    uintptr_t deviceActionAllowedOff, deviceActionControlledOff;
     uintptr_t imageSize;
 };
 
 inline const VerSet kVer[] = {
     // GameViewer 4.40.0.1780  SizeOfImage=0x4570000
-    // isControlled @ 0x2C95E0  (movzx eax, [rcx+0FAh]; ret)
-    // dispatcher ret @ 0x2D270D (sub_1402D26C0)
-    // DeviceDesktopScene::render @ 0x3F96B0
-    { L"4.40.0.1780", 0x2C95E0, 0x2D270D, 0x2D270D, 0x3F96B0, 0x69, 0x90, 0x4570000 },
+    { L"4.40.0.1780", 0x2C95E0, 0x2D270D, 0x2D270D, 0x3F96B0, 0x69, 0x6a, 0x8f, 0x90, 0x4570000 },
 };
 
 inline const VerSet& pick(const wchar_t* v) {

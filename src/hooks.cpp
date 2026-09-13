@@ -25,30 +25,34 @@ static bool __fastcall h_isCtrlNarrow436(void* thiz) {
     return o_isCtrlNarrow436(thiz);
 }
 
-// DeviceDesktopScene::render：同步渲染期间把「禁止进入桌面」两字节清掉。
-// 4.40 判断：platform 为 Win(1)/Mac(4) 且 +0x69、+0x90 都为 0 才画出进入桌面。
+// DeviceDesktopScene::render：同步渲染期间改成「允许且未被控」。
+// +0x69=0 会画「该设备不允许被控」；+0x6a=1 会藏进入桌面按钮。
 using fn_device_scene_render436_t = void(__fastcall*)(void*, unsigned char*);
 static fn_device_scene_render436_t o_deviceSceneRender436 = nullptr;
-static uintptr_t g_deviceDesktopBlockOff436 = 0;
-static uintptr_t g_deviceActionBlockOff436 = 0;
+static uintptr_t g_deviceDesktopAllowedOff436 = 0;
+static uintptr_t g_deviceDesktopControlledOff436 = 0;
+static uintptr_t g_deviceActionAllowedOff436 = 0;
+static uintptr_t g_deviceActionControlledOff436 = 0;
 static void __fastcall h_deviceSceneRender436(void* scene, unsigned char* data) {
     struct SavedFlag {
         unsigned char* ptr;
         unsigned char value;
-    } saved[2]{};
+    } saved[4]{};
     size_t savedCount = 0;
     __try {
-        if (data && (g_deviceDesktopBlockOff436 || g_deviceActionBlockOff436)) {
+        if (data && g_deviceDesktopAllowedOff436 && g_deviceDesktopControlledOff436) {
             const unsigned int platform = *(unsigned int*)(data + 0x60);
             if (platform == 1 || platform == 4) {
-                auto clearFlag = [&](uintptr_t off) {
+                auto overrideFlag = [&](uintptr_t off, unsigned char value) {
                     if (!off) return;
                     unsigned char* ptr = data + off;
                     saved[savedCount++] = { ptr, *ptr };
-                    *ptr = 0;
+                    *ptr = value;
                 };
-                clearFlag(g_deviceDesktopBlockOff436);
-                clearFlag(g_deviceActionBlockOff436);
+                overrideFlag(g_deviceDesktopAllowedOff436, 1);
+                overrideFlag(g_deviceDesktopControlledOff436, 0);
+                overrideFlag(g_deviceActionAllowedOff436, 1);
+                overrideFlag(g_deviceActionControlledOff436, 0);
             }
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -104,8 +108,10 @@ void install_hooks(uintptr_t base) {
     g_isCtrlGuardRet436 = base + V.isCtrlGuardRetRva;
     hookset::install_at((void*)(base + V.isCtrlNarrowRva), "isControlledConnectOnly", "rva",
                         (void*)h_isCtrlNarrow436, (void**)&o_isCtrlNarrow436, rec);
-    g_deviceDesktopBlockOff436 = V.deviceDesktopBlockOff;
-    g_deviceActionBlockOff436 = V.deviceActionBlockOff;
+    g_deviceDesktopAllowedOff436 = V.deviceDesktopAllowedOff;
+    g_deviceDesktopControlledOff436 = V.deviceDesktopControlledOff;
+    g_deviceActionAllowedOff436 = V.deviceActionAllowedOff;
+    g_deviceActionControlledOff436 = V.deviceActionControlledOff;
     hookset::install_at((void*)(base + V.deviceSceneRenderRva), "deviceDesktopControlAllowed", "rva",
                         (void*)h_deviceSceneRender436, (void**)&o_deviceSceneRender436, rec);
     uu_log("install_hooks done");

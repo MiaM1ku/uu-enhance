@@ -87,6 +87,6 @@ vendor/minhook/ MinHook 源码
 1. 拿到新版 GameViewer.exe，用 IDA 打开
 2. HomePageContent 构造里 `this+0x30` 是次虚表（`??_7HomePageContent@home@client_ui@@6B@_1`）。槽 `+0xE0` 是 `isControlled()`，4.40 实现为 `movzx eax, [rcx+0FAh]; ret`
 3. 只在「提交连接 / 发起远控保护」两处对 `isControlled()` 撒谎。4.40 这两处都走 `sub_1402D26C0` 分发器，返回地址是 `call [rax+0E0h]` 的下一条
-4. `DeviceDesktopScene::render`：`DeviceDetailViewData+0x60` 是 platform（1=Win，4=Mac）；`+0x69` 或 `+0x90` 非 0 则不画「进入桌面」。hook 只在 render 期间把这两字节清 0，返回后恢复
+4. `DeviceDesktopScene::render`：`DeviceDetailViewData+0x60` 是 platform（1=Win，4=Mac）。`+0x69=0` 会画「该设备不允许被控」，`+0x6a=1` 会藏进入桌面。hook 只在 render 期间改成允许=1、被控=0，返回后恢复
 5. 布局守卫：`SizeOfImage` + 字符串 `startRemoteAssist: device data is not init, return` 和 `control_mode_switch`
 6. 重新构建、测试、发版
