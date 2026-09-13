@@ -65,11 +65,11 @@ src/           补丁本体
   app.rc       DLL 的 VERSIONINFO 资源
   dllmain.cpp  入口：代理转发 + 后台线程
   proxy.cpp    version.dll 17 个导出转发
-  hooks.cpp    功能 hook + 按版本分流定位 + 会话管理
+  hooks.cpp    被控期间仍可远控：isControlled 窄绕过 + 设备卡片渲染
   resolver.cpp 抗更新定位器（字符串 + .pdata）
   tray.cpp     系统托盘菜单
   config.cpp   ini 读写
-  offsets.h    已知版本的对象偏移和被控状态包装器 RVA
+  offsets.h    4.40 isControlled / DeviceDesktopScene RVA
 
 installer/     一键安装器
   installer.cpp  GUI + 自动查找 + 释放/卸载 + 更新检查
@@ -82,14 +82,11 @@ vendor/minhook/ MinHook 源码
 
 ## 适配 GameViewer 新版本
 
-如果用户报告某个 hook 挂不上（托盘调试信息里显示"未定位"），需要：
+4.40 起只保留「被控期间仍可远控其他主机」。版本表在 `src/offsets.h`。未知版本或 SizeOfImage 对不上会拒绝安装 RVA hook。
 
 1. 拿到新版 GameViewer.exe，用 IDA 打开
-2. 按 `src/hooks.cpp` 的 `kHooks[]` 日志字符串确认各函数仍能定位
-3. 在 `src/offsets.h` 的 `kVer[]` 最前面加一行新版本；新版放最前是因为 `pick()` 对未知版本兜底用 `kVer[0]`
-4. 确认 CCS 的 `device_id` 偏移（`VerSet::deviceIdOff`，十进制）有没有变：反编译 `setConnectInfo`，看 "startConnectOtherDevice, device_id: " 那行日志把 `this + N` 传给 ostream<<string，`N` 就是偏移。4.26=3984、4.29=4296，逐版本会变，必须核对
-5. 确认 `VideoMainWindow`（每会话视频窗，托盘会话名来源）的两个偏移 `VerSet::vmwDevIdOff`/`vmwTitleOff`（十进制）：反编译它的构造函数（日志锚点 "home_control_session_start: window_created, device_id="），看 `QString::QString(this+N, deviceId)` 得 `vmwDevIdOff`；构造里紧跟的空 QString（后续 `setWindowTitle(this, this+M)` 用它）得 `vmwTitleOff`。4.29=344/352。读错只回退显示 deviceId，不致命，但要好友名就得核对
-6. 确认两个 `isControlled()` 包装器 RVA，以及 `HomePageContent` 状态成员的偏移和表示。4.33.0.8907 的通用/直接包装器 RVA 分别为 `0x73fe10`/`0x4ea310`，状态成员为 `+0x30` 的内嵌对象
-7. 重新构建、测试、发版
-
-多数 hook 会由 `resolver.cpp` 自动按字符串定位。版本表只提供结构体偏移和无法用日志字符串定位的被控状态包装器；只有 UU 改了函数名、日志内容或二进制结构时才需要调整定位逻辑。
+2. HomePageContent 构造里 `this+0x30` 是次虚表（`??_7HomePageContent@home@client_ui@@6B@_1`）。槽 `+0xE0` 是 `isControlled()`，4.40 实现为 `movzx eax, [rcx+0FAh]; ret`
+3. 只在「提交连接 / 发起远控保护」两处对 `isControlled()` 撒谎。4.40 这两处都走 `sub_1402D26C0` 分发器，返回地址是 `call [rax+0E0h]` 的下一条
+4. `DeviceDesktopScene::render`：`DeviceDetailViewData+0x60` 是 platform（1=Win，4=Mac）；`+0x69` 或 `+0x90` 非 0 则不画「进入桌面」。hook 只在 render 期间把这两字节清 0，返回后恢复
+5. 布局守卫：`SizeOfImage` + 字符串 `startRemoteAssist: device data is not init, return` 和 `control_mode_switch`
+6. 重新构建、测试、发版

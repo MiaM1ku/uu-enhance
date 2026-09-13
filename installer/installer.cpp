@@ -464,8 +464,8 @@ static void doInstall(HWND hwnd) {
     } else {
         MessageBoxW(hwnd,
             L"安装完成!\n\n"
-            L"打开 GameViewer 后，系统托盘会出现「UU远程增强」图标，\n"
-            L"右键它就能按会话开关: 仅浏览 / 剪贴板 / 手柄。",
+            L"打开 GameViewer 后，系统托盘会出现「UU远程增强」图标。\n"
+            L"被控期间仍可远控其他主机。",
             L"安装成功", MB_ICONINFORMATION);
     }
     offerRestart(hwnd, bin);
@@ -620,7 +620,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
         SetTextColor(hdc, CLR_BANNER_SUB);
         SelectObject(hdc, g_font);
         RECT rtSub{ MARGIN, 42, WIN_W, 60 };
-        DrawTextW(hdc, L"主控端功能增强补丁  ·  一键安装器", -1, &rtSub,
+        DrawTextW(hdc, L"被控期间仍可远控  ·  一键安装器", -1, &rtSub,
                   DT_SINGLELINE | DT_NOPREFIX);
 
         EndPaint(hwnd, &ps);
