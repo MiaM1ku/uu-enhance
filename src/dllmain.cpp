@@ -5,7 +5,6 @@
 
 void proxy_init();
 void install_hooks(uintptr_t base);
-void start_tray();
 
 static bool exe_basename_is(const wchar_t* name) {
     wchar_t path[MAX_PATH]{};
@@ -24,7 +23,6 @@ static DWORD WINAPI init_thread(LPVOID) {
     uu_log("v%s controller GameViewer.exe base=%p", UURE_VERSION, (void*)base);
     cfg::load();
     install_hooks(base);
-    start_tray();
     uu_log("controller ready");
     return 0;
 }

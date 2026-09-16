@@ -23,6 +23,9 @@ struct VerSet {
 };
 
 inline const VerSet kVer[] = {
+    // GameViewer 4.40.1.2090  SizeOfImage=0x4570000
+    // RVA 与 4.40.0.1780 相同：isControlled @ 0x2C95E0，dispatcher ret @ 0x2D270D，render @ 0x3F96B0
+    { L"4.40.1.2090", 0x2C95E0, 0x2D270D, 0x2D270D, 0x3F96B0, 0x69, 0x6a, 0x8f, 0x90, 0x4570000 },
     // GameViewer 4.40.0.1780  SizeOfImage=0x4570000
     { L"4.40.0.1780", 0x2C95E0, 0x2D270D, 0x2D270D, 0x3F96B0, 0x69, 0x6a, 0x8f, 0x90, 0x4570000 },
 };

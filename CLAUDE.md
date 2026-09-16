@@ -33,7 +33,7 @@ GitHub 仓库地址也在这里（`UURE_GITHUB` / `UURE_GITHUB_W`），安装器
 
 1. **改版本号**：编辑 `src/app.h`，同时改 `UURE_VERSION`、`UURE_VERSION_W`、`UURE_VERSION_RC` 三个宏。
 2. **构建**：`cmake --build build --config Release`。确认 `build/Release/` 下 DLL 和安装器都更新了。
-3. **测试**：把产出的 `version.dll` 丢进 GameViewer 的 `bin\` 目录，启动 GameViewer，确认托盘图标出现、版本号正确、各功能正常。用安装器测一遍安装/卸载/更新流程。
+3. **测试**：把产出的 `version.dll` 丢进 GameViewer 的 `bin\` 目录，启动 GameViewer，确认日志写出、各功能正常（默认不显示托盘图标）。用安装器测一遍安装/卸载/更新流程。
 4. **提交 + 打 tag**：
    ```powershell
    git add -A
@@ -53,7 +53,7 @@ GitHub 仓库地址也在这里（`UURE_GITHUB` / `UURE_GITHUB_W`），安装器
 
 ## 安装器更新检查
 
-安装器启动时在后台线程用 WinHTTP 请求 `https://api.github.com/repos/djkcyl/uu-enhance/releases/latest`，从返回的 JSON 里取 `tag_name` 字段，去掉 `v` 前缀后和内嵌的 `UURE_VERSION` 比较。如果 Release 版本更新，在底部链接栏显示"新版本 vX.Y.Z 可用"并指向 Release 页面。请求失败（没网、API 限流、仓库不存在）静默忽略。
+安装器启动时在后台线程用 WinHTTP 请求 `https://api.github.com/repos/MiaM1ku/uu-enhance/releases/latest`，从返回的 JSON 里取 `tag_name` 字段，去掉 `v` 前缀后和内嵌的 `UURE_VERSION` 比较。如果 Release 版本更新，在底部链接栏显示"新版本 vX.Y.Z 可用"并指向 Release 页面。请求失败（没网、API 限流、仓库不存在）静默忽略。
 
 所以**发了 Release 就等于推送了更新通知**，不需要额外的更新服务器。
 
@@ -67,9 +67,9 @@ src/           补丁本体
   proxy.cpp    version.dll 17 个导出转发
   hooks.cpp    被控期间仍可远控：isControlled 窄绕过 + 设备卡片渲染
   resolver.cpp 抗更新定位器（字符串 + .pdata）
-  tray.cpp     系统托盘菜单
+  tray.cpp     系统托盘菜单（默认不启动）
   config.cpp   ini 读写
-  offsets.h    4.40 isControlled / DeviceDesktopScene RVA
+  offsets.h    4.40.1 / 4.40.0 isControlled / DeviceDesktopScene RVA
 
 installer/     一键安装器
   installer.cpp  GUI + 自动查找 + 释放/卸载 + 更新检查

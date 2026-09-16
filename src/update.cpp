@@ -37,7 +37,7 @@ bool fetch_latest_tag(std::wstring& out) {
     HINTERNET con = WinHttpConnect(ses, L"api.github.com", INTERNET_DEFAULT_HTTPS_PORT, 0);
     if (con) {
         HINTERNET req = WinHttpOpenRequest(con, L"GET",
-            L"/repos/djkcyl/uu-enhance/releases/latest",
+            L"/repos/MiaM1ku/uu-enhance/releases/latest",
             nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
         if (req) {
             if (WinHttpSendRequest(req, nullptr, 0, nullptr, 0, 0, 0) &&

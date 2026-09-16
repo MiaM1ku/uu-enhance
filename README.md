@@ -6,13 +6,13 @@
 
 ## 功能
 
-当前适配 **GameViewer 4.40.0.1780**。4.40 已自带观看模式，本补丁只保留一项：
+当前适配 **GameViewer 4.40.1.2090**（兼容 4.40.0.1780）。4.40 已自带观看模式，本补丁只保留一项：
 
 - **被控期间仍可远控其他主机** — 本机正在被别人控制时，设备列表仍可点「进入桌面」，并继续发起对其它主机的远控。被控页的收起/展开不受影响。
 
 ## 安装
 
-从 [Releases](https://github.com/djkcyl/uu-enhance/releases) 下载 `uu-enhance-installer-<版本>.exe`，双击安装/卸载，自动定位 GameViewer；DLL 被占用时会列出进程并可一键关闭/重启。也可手动把 `version.dll` 放进 `GameViewer\bin\`。
+从 [Releases](https://github.com/MiaM1ku/uu-enhance/releases) 下载 `uu-enhance-installer-<版本>.exe`，双击安装/卸载，自动定位 GameViewer；DLL 被占用时会列出进程并可一键关闭/重启。也可手动把 `version.dll` 放进 `GameViewer\bin\`。
 
 ## 构建
 

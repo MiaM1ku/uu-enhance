@@ -292,7 +292,7 @@ static DWORD WINAPI checkUpdateThread(LPVOID param) {
     if (!con) { WinHttpCloseHandle(ses); return fail(); }
 
     HINTERNET req = WinHttpOpenRequest(con, L"GET",
-        L"/repos/djkcyl/uu-enhance/releases/latest",
+        L"/repos/MiaM1ku/uu-enhance/releases/latest",
         nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
         WINHTTP_FLAG_SECURE);
     if (!req) { WinHttpCloseHandle(con); WinHttpCloseHandle(ses); return fail(); }
@@ -464,8 +464,7 @@ static void doInstall(HWND hwnd) {
     } else {
         MessageBoxW(hwnd,
             L"安装完成!\n\n"
-            L"打开 GameViewer 后，系统托盘会出现「UU远程增强」图标。\n"
-            L"被控期间仍可远控其他主机。",
+            L"打开 GameViewer 即生效。被控期间仍可远控其他主机。",
             L"安装成功", MB_ICONINFORMATION);
     }
     offerRestart(hwnd, bin);
