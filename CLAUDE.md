@@ -69,7 +69,7 @@ src/           补丁本体
   resolver.cpp 抗更新定位器（字符串 + .pdata）
   tray.cpp     系统托盘菜单（默认不启动）
   config.cpp   ini 读写
-  offsets.h    4.40.1 / 4.40.0 isControlled / DeviceDesktopScene RVA
+  offsets.h    4.42.1 / 4.40.1 / 4.40.0 isControlled / DeviceDesktopScene RVA
 
 installer/     一键安装器
   installer.cpp  GUI + 自动查找 + 释放/卸载 + 更新检查
@@ -82,11 +82,11 @@ vendor/minhook/ MinHook 源码
 
 ## 适配 GameViewer 新版本
 
-4.40 起只保留「被控期间仍可远控其他主机」。版本表在 `src/offsets.h`。未知版本或 SizeOfImage 对不上会拒绝安装 RVA hook。
+4.40 起只保留「被控期间仍可远控其他主机」。版本表在 `src/offsets.h`（当前支持 4.42.1.2835 / 4.40.1.2090 / 4.40.0.1780）。未知版本或 SizeOfImage 对不上会拒绝安装 RVA hook。
 
 1. 拿到新版 GameViewer.exe，用 IDA 打开
 2. HomePageContent 构造里 `this+0x30` 是次虚表（`??_7HomePageContent@home@client_ui@@6B@_1`）。槽 `+0xE0` 是 `isControlled()`，4.40 实现为 `movzx eax, [rcx+0FAh]; ret`
-3. 只在「提交连接 / 发起远控保护」两处对 `isControlled()` 撒谎。4.40 这两处都走 `sub_1402D26C0` 分发器，返回地址是 `call [rax+0E0h]` 的下一条
-4. `DeviceDesktopScene::render`：`DeviceDetailViewData+0x60` 是 platform（1=Win，4=Mac）。`+0x69=0` 会画「该设备不允许被控」，`+0x6a=1` 会藏进入桌面。hook 只在 render 期间改成允许=1、被控=0，返回后恢复
+3. 只在「提交连接 / 发起远控保护」两处对 `isControlled()` 撒谎。这两处都走命令分发器：4.40 是 `sub_1402D26C0`（ret `0x2D270D`），4.42.1 是 `sub_1402D7B90`（`startRemoteAssist` / `startCloudDeviceAdd` / `startCloudDeviceMarket` 都经它，ret `0x2D7BDD`）；返回地址取 `call [rax+0E0h]` 的下一条。分发器被控分支只做「收起被控窗口 + 不跑回调」，真正收起被控页的其它调用点仍拿真值
+4. `DeviceDesktopScene::render`：`DeviceDetailViewData+0x60` 是 platform（1=Win，4=Mac）。`+0x69=0` 会画「该设备不允许被控」，`+0x6a=1` 会藏进入桌面。hook 只在 render 期间改成允许=1、被控=0，返回后恢复。4.40 render @ `0x3F96B0`，4.42.1 @ `0x3FF0B0`。操作区另有一组：4.40 是 `+0x8f`（允许）/ `+0x90`（被控）；4.42.1 只有 `+0x8d` 这一个「可用 && !被控」位需要置 1，`+0x8e` 是能力位不能清零，所以 `deviceActionControlledOff` 填 0 表示跳过
 5. 布局守卫：`SizeOfImage` + 字符串 `startRemoteAssist: device data is not init, return` 和 `control_mode_switch`
 6. 重新构建、测试、发版
