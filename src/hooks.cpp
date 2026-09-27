@@ -27,32 +27,49 @@ static bool __fastcall h_isCtrlNarrow436(void* thiz) {
 
 // DeviceDesktopScene::render：同步渲染期间改成「允许且未被控」。
 // +0x69=0 会画「该设备不允许被控」；+0x6a=1 会藏进入桌面按钮。
+// 4.42.1 底部工具栏（观看模式/文件传输）走 +0xD8 工具数组，不看 +0x8D。
 using fn_device_scene_render436_t = void(__fastcall*)(void*, unsigned char*);
 static fn_device_scene_render436_t o_deviceSceneRender436 = nullptr;
 static uintptr_t g_deviceDesktopAllowedOff436 = 0;
 static uintptr_t g_deviceDesktopControlledOff436 = 0;
 static uintptr_t g_deviceActionAllowedOff436 = 0;
 static uintptr_t g_deviceActionControlledOff436 = 0;
+static uintptr_t g_deviceActionEnabledOff436 = 0;
+static uintptr_t g_deviceBottomToolsVecOff436 = 0;
 static void __fastcall h_deviceSceneRender436(void* scene, unsigned char* data) {
     struct SavedFlag {
         unsigned char* ptr;
         unsigned char value;
-    } saved[4]{};
+    } saved[24]{};
     size_t savedCount = 0;
     __try {
         if (data && g_deviceDesktopAllowedOff436 && g_deviceDesktopControlledOff436) {
             const unsigned int platform = *(unsigned int*)(data + 0x60);
             if (platform == 1 || platform == 4) {
-                auto overrideFlag = [&](uintptr_t off, unsigned char value) {
-                    if (!off) return;
-                    unsigned char* ptr = data + off;
+                auto overridePtr = [&](unsigned char* ptr, unsigned char value) {
+                    if (!ptr || savedCount >= sizeof(saved) / sizeof(saved[0])) return;
                     saved[savedCount++] = { ptr, *ptr };
                     *ptr = value;
+                };
+                auto overrideFlag = [&](uintptr_t off, unsigned char value) {
+                    if (!off) return;
+                    overridePtr(data + off, value);
                 };
                 overrideFlag(g_deviceDesktopAllowedOff436, 1);
                 overrideFlag(g_deviceDesktopControlledOff436, 0);
                 overrideFlag(g_deviceActionAllowedOff436, 1);
                 overrideFlag(g_deviceActionControlledOff436, 0);
+                overrideFlag(g_deviceActionEnabledOff436, 1);
+                if (g_deviceBottomToolsVecOff436) {
+                    unsigned char* begin = *(unsigned char**)(data + g_deviceBottomToolsVecOff436);
+                    unsigned char* end = *(unsigned char**)(data + g_deviceBottomToolsVecOff436 + 8);
+                    if (begin && end && end >= begin && (size_t)(end - begin) <= 64) {
+                        for (unsigned char* p = begin; p + 8 <= end; p += 8) {
+                            overridePtr(p + 4, 1);
+                            overridePtr(p + 5, 1);
+                        }
+                    }
+                }
             }
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -112,6 +129,8 @@ void install_hooks(uintptr_t base) {
     g_deviceDesktopControlledOff436 = V.deviceDesktopControlledOff;
     g_deviceActionAllowedOff436 = V.deviceActionAllowedOff;
     g_deviceActionControlledOff436 = V.deviceActionControlledOff;
+    g_deviceActionEnabledOff436 = V.deviceActionEnabledOff;
+    g_deviceBottomToolsVecOff436 = V.deviceBottomToolsVecOff;
     hookset::install_at((void*)(base + V.deviceSceneRenderRva), "deviceDesktopControlAllowed", "rva",
                         (void*)h_deviceSceneRender436, (void**)&o_deviceSceneRender436, rec);
     uu_log("install_hooks done");
