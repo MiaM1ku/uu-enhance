@@ -110,6 +110,43 @@ static void __fastcall h_buttonClick436(void* button) {
     if (o_buttonClick436) o_buttonClick436(button);
 }
 
+// HomePageContent::startRemoteAssist()（只做诊断）：点击工具后的命令入口。
+// 它开头检查 this+300（设备数据是否已初始化），不满足就静默 return。
+using fn_start_ra436_t = void(__fastcall*)(void*);
+static fn_start_ra436_t o_startRA436 = nullptr;
+static void __fastcall h_startRA436(void* self) {
+    static int n = 0;
+    if (n < 12) {
+        ++n;
+        __try {
+            char buf[128];
+            std::snprintf(buf, sizeof(buf), "[start-ra] #%d flag300=%d t=%lu", n,
+                          (int)*((unsigned char*)self + 300), (unsigned long)GetTickCount());
+            diag_write(buf);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+    }
+    if (o_startRA436) o_startRA436(self);
+}
+
+// 命令分发器（只做诊断）：记录收到了哪些命令名。
+using fn_cmd_dispatch436_t = void(__fastcall*)(void*, const char*, void*);
+static fn_cmd_dispatch436_t o_cmdDispatch436 = nullptr;
+static void __fastcall h_cmdDispatch436(void* self, const char* name, void* cb) {
+    static int n = 0;
+    if (n < 12) {
+        ++n;
+        __try {
+            char buf[160];
+            std::snprintf(buf, sizeof(buf), "[cmd] #%d name=%s t=%lu", n, name ? name : "?",
+                          (unsigned long)GetTickCount());
+            diag_write(buf);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+    }
+    if (o_cmdDispatch436) o_cmdDispatch436(self, name, cb);
+}
+
 // 4.40：只绕过「本机已被控时禁止再当主控」。
 // isControlled() 本身仍返回真值，被控页收起/展开不受影响。
 
@@ -245,6 +282,12 @@ void install_hooks(uintptr_t base) {
     if (V.deviceBottomButtonClickRva)
         hookset::install_at((void*)(base + V.deviceBottomButtonClickRva), "deviceBottomButtonClick", "rva",
                             (void*)h_buttonClick436, (void**)&o_buttonClick436, rec);
+    if (V.homePageStartRemoteAssistRva)
+        hookset::install_at((void*)(base + V.homePageStartRemoteAssistRva), "homePageStartRemoteAssist", "rva",
+                            (void*)h_startRA436, (void**)&o_startRA436, rec);
+    if (V.cmdDispatchRva)
+        hookset::install_at((void*)(base + V.cmdDispatchRva), "commandDispatch", "rva",
+                            (void*)h_cmdDispatch436, (void**)&o_cmdDispatch436, rec);
     hookset::install_at((void*)(base + V.deviceSceneRenderRva), "deviceDesktopControlAllowed", "rva",
                         (void*)h_deviceSceneRender436, (void**)&o_deviceSceneRender436, rec);
     uu_log("install_hooks done");
