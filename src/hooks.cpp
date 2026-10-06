@@ -101,14 +101,37 @@ static void __fastcall h_buttonClick436(void* button) {
         ++n;
         __try {
             char buf[128];
-            std::snprintf(buf, sizeof(buf), "[btn-click] #%d tool=%u t=%lu", n,
-                          *(unsigned int*)((unsigned char*)button + 68), (unsigned long)GetTickCount());
+            std::snprintf(buf, sizeof(buf), "[btn-click] #%d tool=%u flag72=%u id64=%u t=%lu", n,
+                          *(unsigned int*)((unsigned char*)button + 68),
+                          (unsigned)*(unsigned char*)((unsigned char*)button + 72),
+                          *(unsigned int*)((unsigned char*)button + 64),
+                          (unsigned long)GetTickCount());
             diag_write(buf);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
         }
     }
     if (o_buttonClick436) o_buttonClick436(button);
 }
+
+// 信号链探针（只做诊断）：点击工具后信号逐跳转发，看链在哪一跳断掉。
+// L1 按钮点击信号 → L2 底栏 deviceToolRequested → L3 底栏容器信号0 → L4 场景信号0。
+using fn_sig_probe436_t = void(__fastcall*)(void*, int);
+static fn_sig_probe436_t o_sigProbe436[4] = { nullptr, nullptr, nullptr, nullptr };
+
+static void diag_sigprobe(int idx, int arg) {
+    static int cnt[4] = { 0, 0, 0, 0 };
+    if (idx < 0 || idx > 3 || cnt[idx] >= 8) return;
+    ++cnt[idx];
+    char buf[128];
+    std::snprintf(buf, sizeof(buf), "[sig-L%d] #%d arg=%d t=%lu", idx + 1, cnt[idx], arg,
+                  (unsigned long)GetTickCount());
+    diag_write(buf);
+}
+
+static void __fastcall h_sigProbe0(void* o, int v) { diag_sigprobe(0, v); if (o_sigProbe436[0]) o_sigProbe436[0](o, v); }
+static void __fastcall h_sigProbe1(void* o, int v) { diag_sigprobe(1, v); if (o_sigProbe436[1]) o_sigProbe436[1](o, v); }
+static void __fastcall h_sigProbe2(void* o, int v) { diag_sigprobe(2, v); if (o_sigProbe436[2]) o_sigProbe436[2](o, v); }
+static void __fastcall h_sigProbe3(void* o, int v) { diag_sigprobe(3, v); if (o_sigProbe436[3]) o_sigProbe436[3](o, v); }
 
 // HomePageContent::startRemoteAssist()（只做诊断）：点击工具后的命令入口。
 // 它开头检查 this+300（设备数据是否已初始化），不满足就静默 return。
@@ -288,6 +311,15 @@ void install_hooks(uintptr_t base) {
     if (V.cmdDispatchRva)
         hookset::install_at((void*)(base + V.cmdDispatchRva), "commandDispatch", "rva",
                             (void*)h_cmdDispatch436, (void**)&o_cmdDispatch436, rec);
+    {
+        void* const kProbeFn[4] = { (void*)h_sigProbe0, (void*)h_sigProbe1, (void*)h_sigProbe2, (void*)h_sigProbe3 };
+        const char* const kProbeName[4] = { "sigProbeL1", "sigProbeL2", "sigProbeL3", "sigProbeL4" };
+        for (int i = 0; i < 4; ++i) {
+            if (!V.sigProbeRva[i]) continue;
+            hookset::install_at((void*)(base + V.sigProbeRva[i]), kProbeName[i], "rva",
+                                kProbeFn[i], (void**)&o_sigProbe436[i], rec);
+        }
+    }
     hookset::install_at((void*)(base + V.deviceSceneRenderRva), "deviceDesktopControlAllowed", "rva",
                         (void*)h_deviceSceneRender436, (void**)&o_deviceSceneRender436, rec);
     uu_log("install_hooks done");
