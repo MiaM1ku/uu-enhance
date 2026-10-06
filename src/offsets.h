@@ -41,23 +41,22 @@ struct VerSet {
     // 被控时数据层走这里把底栏按钮打成禁用，按钮就点不动了（DesktopButton::event
     // 里 state==3 直接跳过鼠标事件）。hook 成恒为启用即可。4.40 填 0 跳过。
     uintptr_t deviceBottomButtonStateRva;
-    // DesktopButton 的点击动作：观看模式（tool=0）在这里改走 startRemoteAssist 直连。
-    uintptr_t deviceBottomButtonClickRva;
-    // HomePageContent::startRemoteAssist()：点击工具后的命令入口（只做诊断）。
-    // 开头是 `if (*(BYTE*)(this+300))`，不满足就静默 return，对应日志
-    // "startRemoteAssist: device data is not init, return"（home_page_content.cpp:3012）。
-    uintptr_t homePageStartRemoteAssistRva;
+    // DeviceDetailPresenter 的工具启用判定 isToolEnabled(presenter, toolId, hasSession)。
+    // toolId 0-3（观看/文件/端口/终端）在 hasSession=1 时判 0；本机被控时
+    // presenter+0x18 有入站会话，四个工具就全被压掉（数据层那份 +0xD8 数组的 +4
+    // 同源，被控时也是 0）。转发时把会话参数当 0，能力判定原样保留。4.40 填 0 跳过。
+    uintptr_t deviceToolEnabledCheckRva;
     uintptr_t imageSize;
 };
 
 inline const VerSet kVer[] = {
     // GameViewer 4.42.1.2835  SizeOfImage=0x4636000
-    { L"4.42.1.2835", 0x2CEA70, 0x2D7BDD, 0x2D7BDD, 0x3FF0B0, 0x69, 0x6a, 0x8c, 0, 0x8d, 0xd8, 0x6B6D80, 0x6B6920, 0x2DF760, 0x4636000 },
+    { L"4.42.1.2835", 0x2CEA70, 0x2D7BDD, 0x2D7BDD, 0x3FF0B0, 0x69, 0x6a, 0x8c, 0, 0x8d, 0xd8, 0x6B6D80, 0xA88B90, 0x4636000 },
     // GameViewer 4.40.1.2090  SizeOfImage=0x4570000
     // RVA 与 4.40.0.1780 相同：isControlled @ 0x2C95E0，dispatcher ret @ 0x2D270D，render @ 0x3F96B0
-    { L"4.40.1.2090", 0x2C95E0, 0x2D270D, 0x2D270D, 0x3F96B0, 0x69, 0x6a, 0x8f, 0x90, 0, 0, 0, 0, 0, 0x4570000 },
+    { L"4.40.1.2090", 0x2C95E0, 0x2D270D, 0x2D270D, 0x3F96B0, 0x69, 0x6a, 0x8f, 0x90, 0, 0, 0, 0, 0x4570000 },
     // GameViewer 4.40.0.1780  SizeOfImage=0x4570000
-    { L"4.40.0.1780", 0x2C95E0, 0x2D270D, 0x2D270D, 0x3F96B0, 0x69, 0x6a, 0x8f, 0x90, 0, 0, 0, 0, 0, 0x4570000 },
+    { L"4.40.0.1780", 0x2C95E0, 0x2D270D, 0x2D270D, 0x3F96B0, 0x69, 0x6a, 0x8f, 0x90, 0, 0, 0, 0, 0x4570000 },
 };
 
 inline const VerSet& pick(const wchar_t* v) {

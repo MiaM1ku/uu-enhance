@@ -17,17 +17,14 @@
 
 static uintptr_t g_gvBase = 0;
 
-// HomePageContent 本体。isControlled() 是从次对象（this+0x30）调进来的，
-// 退 0x30 就是本体（已用虚表核对：主虚表 RVA 0x3B53460）。观看模式直连要用它。
-static void* g_homePageThis = nullptr;
-
+// HomePageContent 次对象上的 isControlled()：读 this+0xFA 的一字节。
+// 虚表槽 0xE0，实现经 thunk 跳到这里。
 using fn_is_ctrl436_t = bool(__fastcall*)(void*);
 static fn_is_ctrl436_t o_isCtrlNarrow436 = nullptr;
 static uintptr_t g_isCtrlConnectRet436 = 0;
 static uintptr_t g_isCtrlGuardRet436 = 0;
 static bool __fastcall h_isCtrlNarrow436(void* thiz) {
     const uintptr_t ret = (uintptr_t)_ReturnAddress();
-    if (!g_homePageThis && thiz) g_homePageThis = (unsigned char*)thiz - 0x30;
     if (ret == g_isCtrlConnectRet436 || ret == g_isCtrlGuardRet436) return false;
     return o_isCtrlNarrow436(thiz);
 }
@@ -104,28 +101,17 @@ static void __fastcall h_buttonState436(void* button, char enabled) {
     if (o_buttonState436) o_buttonState436(button, 1);
 }
 
-// HomePageContent::startRemoteAssist()：发起远控的命令入口。
-// 这里挂上来只是为了拿到可调用的 trampoline。
-using fn_start_ra436_t = void(__fastcall*)(void*);
-static fn_start_ra436_t o_startRA436 = nullptr;
-static void __fastcall h_startRA436(void* self) {
-    if (o_startRA436) o_startRA436(self);
-}
-
-// DesktopButton 的点击动作。
-// 观看模式（toolId=0）在 presenter 那边要求 home_frame_model 活着，而被控状态下
-// 它已经销毁（weak_ptr 过期，_Ptr 还留着但 expired() 为真），那条路永远走 skipped。
-// 所以这里直接走主页的发起入口——和「进入桌面」同一个命令，往后照样经过上面那个
-// 撒过谎的命令分发器。
-using fn_button_click436_t = void(__fastcall*)(void*);
-static fn_button_click436_t o_buttonClick436 = nullptr;
-static void __fastcall h_buttonClick436(void* button) {
-    if (o_buttonClick436) o_buttonClick436(button);
-    __try {
-        if (*(unsigned int*)((unsigned char*)button + 68) == 0 && g_homePageThis && o_startRA436)
-            o_startRA436(g_homePageThis);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-    }
+// 工具启用判定 DeviceDetailPresenter::isToolEnabled(presenter, toolId, hasSession)。
+// 被「已有会话」压掉：本机被控时 presenter+0x18 有入站会话，第三个参数为 1，
+// 底栏四个工具（观看/文件传输/端口/终端，toolId 0-3）就全部判为不可用。
+// onDeviceTool 每次点击都用它现算「已发布工具」列表，+4 为 0 直接 not_published 拒绝。
+// 转发时把会话参数强制当 0（当作没有会话）：设备能力判定（sub_140A85BA0）和
+// 云设备分支（toolId=4 的平台/能力检查）都原样保留。
+using fn_tool_enabled436_t = unsigned char(__fastcall*)(void*, unsigned int, unsigned char);
+static fn_tool_enabled436_t o_toolEnabled436 = nullptr;
+static unsigned char __fastcall h_toolEnabled436(void* presenter, unsigned int toolId, unsigned char hasSession) {
+    (void)hasSession;
+    return o_toolEnabled436 ? o_toolEnabled436(presenter, toolId, 0) : 0;
 }
 
 static std::mutex g_dbgMtx;
@@ -174,12 +160,9 @@ void install_hooks(uintptr_t base) {
     if (V.deviceBottomButtonStateRva)
         hookset::install_at((void*)(base + V.deviceBottomButtonStateRva), "deviceBottomButtonState", "rva",
                             (void*)h_buttonState436, (void**)&o_buttonState436, rec);
-    if (V.deviceBottomButtonClickRva)
-        hookset::install_at((void*)(base + V.deviceBottomButtonClickRva), "deviceBottomButtonClick", "rva",
-                            (void*)h_buttonClick436, (void**)&o_buttonClick436, rec);
-    if (V.homePageStartRemoteAssistRva)
-        hookset::install_at((void*)(base + V.homePageStartRemoteAssistRva), "homePageStartRemoteAssist", "rva",
-                            (void*)h_startRA436, (void**)&o_startRA436, rec);
+    if (V.deviceToolEnabledCheckRva)
+        hookset::install_at((void*)(base + V.deviceToolEnabledCheckRva), "deviceToolEnabledCheck", "rva",
+                            (void*)h_toolEnabled436, (void**)&o_toolEnabled436, rec);
     hookset::install_at((void*)(base + V.deviceSceneRenderRva), "deviceDesktopControlAllowed", "rva",
                         (void*)h_deviceSceneRender436, (void**)&o_deviceSceneRender436, rec);
     uu_log("install_hooks done");

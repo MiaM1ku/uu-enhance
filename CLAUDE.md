@@ -91,11 +91,11 @@ vendor/minhook/ MinHook 源码
 
 ### 被控时底栏工具点了没反应
 
-被控状态把两条路都掐了，要一起处理：
+拦截点不在信号层也不在 model——点击从按钮经四跳信号（toolId 直传）到 `DeviceDesktopView::onDeviceTool`（RVA `0x409620`），交给 presenter 后，`DeviceDetailPresenter::onDeviceTool`（RVA `0xA8C720`）开头先现场构建「已发布工具」列表再查表：
 
-- **按钮本身被禁用**：数据层调 `DesktopButton` 的启用状态设置（4.42.1 RVA `0x6B6D80`），`a2=0` 会把 state 置 3；而 `DesktopButton::event`（RVA `0x6B6920`）在 state==3 时直接跳过鼠标事件，点击根本到不了信号层。hook 这个函数恒按启用处理即可，底栏和「更多工具」里的按钮都不再灰。
-- **presenter 那条路依赖已销毁的对象**：点击经信号链（按钮 → `DeviceBottomWidget` → 底栏容器 → `DeviceDesktopScene`，四跳都是 toolId 直传）到达 `DeviceDesktopView::onDeviceTool`（RVA `0x409620`），它把请求交给 presenter（`DeviceDetailPresenter::onDeviceTool`，RVA `0xA8C720`）。观看模式（toolId=0）那一支要求 `presenter+0x40` 的 `home_frame_model` 活着——它是 `DeviceDesktopView+0x38` 注入的 weak_ptr，被控时对象已销毁（`_Ptr` 残留但 `expired()` 为真），于是走 `skipped reason=home_frame_model_unavailable` 静默返回。这条日志是 Warning 级，默认不输出，所以界面上毫无提示。
+- **启用判定 `isToolEnabled`（4.42.1 RVA `0xA88B90`）**：签名 `(presenter, toolId, hasSession)`。toolId 0-3（观看/文件传输/端口/终端）在 `hasSession=1` 时判 0；本机被控时 presenter+0x18 有入站会话，`hasSession=1`，这四个工具就全被压掉。toolId>3（重启/电源）不受影响——所以被控时日志里 id=5,6 的 `en=1`、id=0-3 的 `en=0`，数据层 `+0xD8` 数组的 `+4` 与之同源。查表没过就 `reason=not_published` 拒绝（Warning 级日志，默认看不见，界面毫无提示）。
+- **按钮 state 被禁用**：`DesktopButton` 的启用状态设置（RVA `0x6B6D80`）把 state 置 3，`DesktopButton::event`（RVA `0x6B6920`）在 state==3 时直接丢鼠标事件。
 
-修法：点击 toolId=0 时直接调 `HomePageContent::startRemoteAssist`（4.42.1 RVA `0x2DF760`），也就是「进入桌面」用的同一个命令入口，不碰 `home_frame_model`，往后照样经过撒谎过的命令分发器。`HomePageContent` 的 this 从 `isControlled()` 的次对象退 `0x30` 得到（可用主虚表 RVA `0x3B53460` 核对）。它开头检查 `this+300`（设备数据是否已初始化），为 0 会静默 return。
+修法两处 hook：`isToolEnabled` 转发时把 `hasSession` 强制当 0（设备能力判定 `sub_140A85BA0` 和云设备 toolId=4 的平台检查原样保留）；`DesktopButton` 启用状态恒按启用处理。**不要**用 `startRemoteAssist` 直连观看模式——那是"开始协助"的入口，会跳到协助流程而不是直接以仅观看模式连上主机；观看模式的正确路径是 presenter case 0 → `home_frame_model`（presenter+0x28，仅 NULL 检查，被控时非空）→ dispatch `"view_mode"` 请求，修好启用判定后这条原路就能走通。
 5. 布局守卫：`SizeOfImage` + 字符串 `startRemoteAssist: device data is not init, return` 和 `control_mode_switch`
 6. 重新构建、测试、发版
