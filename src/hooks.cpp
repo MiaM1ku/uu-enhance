@@ -55,6 +55,25 @@ static void diag_isctrl(uintptr_t ret) {
     diag_write(buf);
 }
 
+// HomePageContent 的 this：isControlled 是从次对象（this+0x30）调进来的，
+// 退回去就是主页内容本体。先记下来备用（绕过 presenter 直接发起远控要用）。
+static void* g_homePageThis = nullptr;
+static void remember_home_page(void* thiz) {
+    if (g_homePageThis || !thiz) return;
+    g_homePageThis = (unsigned char*)thiz - 0x30;
+    void* vtbl = nullptr;
+    __try {
+        vtbl = *(void**)g_homePageThis;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        vtbl = nullptr;
+    }
+    char buf[200];
+    std::snprintf(buf, sizeof(buf), "[homepage-this] thiz=%p this=%p vtbl=%p vtblRva=%llx t=%lu", thiz,
+                  g_homePageThis, vtbl, (unsigned long long)((uintptr_t)vtbl - g_gvBase),
+                  (unsigned long)GetTickCount());
+    diag_write(buf);
+}
+
 // 底栏工具数组的原始内容（前 3 次）：确认官方给 +4/+5 的到底是什么。
 static void diag_tools(unsigned char* data, unsigned char* begin, unsigned char* end) {
     static int done = 0;
@@ -170,6 +189,28 @@ static void __fastcall h_setPresenter436(void* view, void* a2, void* a3) {
     if (o_setPresenter436) o_setPresenter436(view, a2, a3);
 }
 
+// presenter 的工具处理（只做诊断）：看它收到的 toolId，以及观看模式依赖的
+// home_frame_model（presenter+0x40，weak_ptr）到底还在不在。
+using fn_presenter_tool436_t = long long(__fastcall*)(void*, void*);
+static fn_presenter_tool436_t o_presenterTool436 = nullptr;
+static long long __fastcall h_presenterTool436(void* presenter, void* arg) {
+    static int n = 0;
+    if (n < 6) {
+        ++n;
+        __try {
+            char buf[200];
+            std::snprintf(buf, sizeof(buf), "[presenter-tool] #%d tool=%u model=%p flag320=%u t=%lu", n,
+                          *(unsigned int*)((unsigned char*)arg + 32),
+                          *(void**)((unsigned char*)presenter + 40),
+                          (unsigned)*(unsigned char*)((unsigned char*)presenter + 320),
+                          (unsigned long)GetTickCount());
+            diag_write(buf);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+    }
+    return o_presenterTool436 ? o_presenterTool436(presenter, arg) : 0;
+}
+
 // HomePageContent::startRemoteAssist()（只做诊断）：点击工具后的命令入口。
 // 它开头检查 this+300（设备数据是否已初始化），不满足就静默 return。
 using fn_start_ra436_t = void(__fastcall*)(void*);
@@ -217,6 +258,7 @@ static uintptr_t g_isCtrlGuardRet436 = 0;
 static bool __fastcall h_isCtrlNarrow436(void* thiz) {
     const uintptr_t ret = (uintptr_t)_ReturnAddress();
     diag_isctrl(ret);
+    remember_home_page(thiz);
     if (ret == g_isCtrlConnectRet436 || ret == g_isCtrlGuardRet436) return false;
     return o_isCtrlNarrow436(thiz);
 }
@@ -363,6 +405,9 @@ void install_hooks(uintptr_t base) {
     if (V.setPresenterRva)
         hookset::install_at((void*)(base + V.setPresenterRva), "setPresenter", "rva",
                             (void*)h_setPresenter436, (void**)&o_setPresenter436, rec);
+    if (V.presenterToolRva)
+        hookset::install_at((void*)(base + V.presenterToolRva), "presenterTool", "rva",
+                            (void*)h_presenterTool436, (void**)&o_presenterTool436, rec);
     hookset::install_at((void*)(base + V.deviceSceneRenderRva), "deviceDesktopControlAllowed", "rva",
                         (void*)h_deviceSceneRender436, (void**)&o_deviceSceneRender436, rec);
     uu_log("install_hooks done");
