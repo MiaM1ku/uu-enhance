@@ -31,8 +31,9 @@ struct VerSet {
     // actionAllowed=0 时 4.40 操作区不可用；4.42.1 起外层门是 +0x8C（render 用来 show/hide a1+120）。
     // 4.42.1 的 +0x8D 是该条启用样式（1=style 5，0=style 16），用 deviceActionEnabledOff 置 1。
     // +0x8E 是能力位，清零会把操作条关掉，所以 deviceActionControlledOff=0 表示跳过。
-    // 4.42.1 底部工具栏：+0xD8/+0xE0 是 8 字节项 vector（DWORD toolId, +4 启用, +5 可见）。
-    // 被控时 +4/+5 会被清掉，DesktopBottomWidget 就不画或置灰。4.40 填 0 跳过。
+    // 4.42.1 底部工具栏：+0xD8/+0xE0 是 8 字节项 vector（DWORD toolId, +4 启用, +5 上栏）。
+    // 被控时 +4 被清成 0，DesktopBottomWidget 把按钮画成灰的；+5 决定该项出不出现。
+    // hook 只置 +4=1，出栏集合保持官方，布局不动。4.40 填 0 跳过。
     uintptr_t deviceDesktopAllowedOff, deviceDesktopControlledOff;
     uintptr_t deviceActionAllowedOff, deviceActionControlledOff;
     uintptr_t deviceActionEnabledOff, deviceBottomToolsVecOff;

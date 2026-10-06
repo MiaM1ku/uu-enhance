@@ -28,6 +28,9 @@ static bool __fastcall h_isCtrlNarrow436(void* thiz) {
 // DeviceDesktopScene::render：同步渲染期间改成「允许且未被控」。
 // +0x69=0 会画「该设备不允许被控」；+0x6a=1 会藏进入桌面按钮。
 // 4.42.1 底部工具栏（观看模式/文件传输）走 +0xD8 工具数组，不看 +0x8D。
+// 数组每项 8 字节：DWORD toolId，+4 按钮启用，+5 是否上底栏。
+// 只改 +4。改 +5 会让 DesktopBottomWidget 把官方收在「更多工具」里的项
+// 一起拉到 680px 宽的底栏上，8 个图标挤成一排。
 using fn_device_scene_render436_t = void(__fastcall*)(void*, unsigned char*);
 static fn_device_scene_render436_t o_deviceSceneRender436 = nullptr;
 static uintptr_t g_deviceDesktopAllowedOff436 = 0;
@@ -60,13 +63,15 @@ static void __fastcall h_deviceSceneRender436(void* scene, unsigned char* data) 
                 overrideFlag(g_deviceActionAllowedOff436, 1);
                 overrideFlag(g_deviceActionControlledOff436, 0);
                 overrideFlag(g_deviceActionEnabledOff436, 1);
+                // 底栏工具项：只置启用位，保持官方的出栏集合。
+                // 置 +5 会改集合，update() 的集合 diff 又会触发整套重建，
+                // 重建后每个按钮固定 137px + 一个 52px 的「更多」，680px 放不下。
                 if (g_deviceBottomToolsVecOff436) {
                     unsigned char* begin = *(unsigned char**)(data + g_deviceBottomToolsVecOff436);
                     unsigned char* end = *(unsigned char**)(data + g_deviceBottomToolsVecOff436 + 8);
                     if (begin && end && end >= begin && (size_t)(end - begin) <= 64) {
                         for (unsigned char* p = begin; p + 8 <= end; p += 8) {
                             overridePtr(p + 4, 1);
-                            overridePtr(p + 5, 1);
                         }
                     }
                 }
