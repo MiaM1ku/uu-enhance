@@ -88,5 +88,14 @@ vendor/minhook/ MinHook 源码
 2. HomePageContent 构造里 `this+0x30` 是次虚表（`??_7HomePageContent@home@client_ui@@6B@_1`）。槽 `+0xE0` 是 `isControlled()`，4.40 实现为 `movzx eax, [rcx+0FAh]; ret`
 3. 只在「提交连接 / 发起远控保护」两处对 `isControlled()` 撒谎。这两处都走命令分发器：4.40 是 `sub_1402D26C0`（ret `0x2D270D`），4.42.1 是 `sub_1402D7B90`（`startRemoteAssist` / `startCloudDeviceAdd` / `startCloudDeviceMarket` 都经它，ret `0x2D7BDD`）；返回地址取 `call [rax+0E0h]` 的下一条。分发器被控分支只做「收起被控窗口 + 不跑回调」，真正收起被控页的其它调用点仍拿真值
 4. `DeviceDesktopScene::render`：`DeviceDetailViewData+0x60` 是 platform（1=Win，4=Mac）。`+0x69=0` 会画「该设备不允许被控」，`+0x6a=1` 会藏进入桌面。hook 只在 render 期间改成允许=1、被控=0，返回后恢复。4.40 render @ `0x3F96B0`，4.42.1 @ `0x3FF0B0`。操作区：4.40 是 `+0x8f`（允许）/ `+0x90`（被控）；4.42.1 外层门是 `+0x8C`（show/hide a1+120），`+0x8D` 是启用样式需置 1，`+0x8E` 是能力位不能清零（`deviceActionControlledOff=0` 跳过）。4.42.1 底部工具栏（观看模式/文件传输等）另走 `+0xD8` 的 8 字节数组：每项 `DWORD toolId`、`+4` 启用、`+5` 是否上底栏。被控时 `+4` 被清成 0（按钮还在，但是灰的）。render hook 只置 `+4=1`：出栏集合跟官方一致，布局不动，灰按钮变可用。**不要置 `+5`**——`DesktopBottomWidget::update` 拿 `+5` 做集合 diff，集合一变就整套重建按钮，官方收在「更多工具」里的项会被一起拉到 680px 宽的底栏上，7 个 137px 的按钮加一个 52px 的「更多」放不下，全挤成一排
+
+### 被控时底栏工具点了没反应
+
+被控状态把两条路都掐了，要一起处理：
+
+- **按钮本身被禁用**：数据层调 `DesktopButton` 的启用状态设置（4.42.1 RVA `0x6B6D80`），`a2=0` 会把 state 置 3；而 `DesktopButton::event`（RVA `0x6B6920`）在 state==3 时直接跳过鼠标事件，点击根本到不了信号层。hook 这个函数恒按启用处理即可，底栏和「更多工具」里的按钮都不再灰。
+- **presenter 那条路依赖已销毁的对象**：点击经信号链（按钮 → `DeviceBottomWidget` → 底栏容器 → `DeviceDesktopScene`，四跳都是 toolId 直传）到达 `DeviceDesktopView::onDeviceTool`（RVA `0x409620`），它把请求交给 presenter（`DeviceDetailPresenter::onDeviceTool`，RVA `0xA8C720`）。观看模式（toolId=0）那一支要求 `presenter+0x40` 的 `home_frame_model` 活着——它是 `DeviceDesktopView+0x38` 注入的 weak_ptr，被控时对象已销毁（`_Ptr` 残留但 `expired()` 为真），于是走 `skipped reason=home_frame_model_unavailable` 静默返回。这条日志是 Warning 级，默认不输出，所以界面上毫无提示。
+
+修法：点击 toolId=0 时直接调 `HomePageContent::startRemoteAssist`（4.42.1 RVA `0x2DF760`），也就是「进入桌面」用的同一个命令入口，不碰 `home_frame_model`，往后照样经过撒谎过的命令分发器。`HomePageContent` 的 this 从 `isControlled()` 的次对象退 `0x30` 得到（可用主虚表 RVA `0x3B53460` 核对）。它开头检查 `this+300`（设备数据是否已初始化），为 0 会静默 return。
 5. 布局守卫：`SizeOfImage` + 字符串 `startRemoteAssist: device data is not init, return` 和 `control_mode_switch`
 6. 重新构建、测试、发版
