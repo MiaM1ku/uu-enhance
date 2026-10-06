@@ -76,22 +76,38 @@ static void diag_tools(unsigned char* data, unsigned char* begin, unsigned char*
 using fn_button_state436_t = void(__fastcall*)(void*, char);
 static fn_button_state436_t o_buttonState436 = nullptr;
 
-// 谁在要求禁用（去重，最多 16 条）：用来确认数据层是从哪条路径打过来的。
-static void diag_btndisable(uintptr_t ret) {
-    static uintptr_t seen[16]{};
+// 谁在动按钮状态（前 8 次都记，含 enabled）：确认禁用这条路到底走没走。
+static void diag_btnstate(char enabled, uintptr_t ret) {
     static int n = 0;
-    for (int i = 0; i < n; ++i) if (seen[i] == ret) return;
-    if (n >= 16) return;
-    seen[n++] = ret;
+    if (n >= 8) return;
+    ++n;
     char buf[128];
-    std::snprintf(buf, sizeof(buf), "[btn-disable] #%d rva=%llx t=%lu", n,
+    std::snprintf(buf, sizeof(buf), "[btn-state] #%d en=%d rva=%llx t=%lu", n, (int)enabled,
                   (unsigned long long)(ret - g_gvBase), (unsigned long)GetTickCount());
     diag_write(buf);
 }
 
 static void __fastcall h_buttonState436(void* button, char enabled) {
-    if (!enabled) diag_btndisable((uintptr_t)_ReturnAddress());
+    diag_btnstate(enabled, (uintptr_t)_ReturnAddress());
     if (o_buttonState436) o_buttonState436(button, 1);
+}
+
+// 点击动作（只做诊断）：鼠标事件有没有走到这里。
+using fn_button_click436_t = void(__fastcall*)(void*);
+static fn_button_click436_t o_buttonClick436 = nullptr;
+static void __fastcall h_buttonClick436(void* button) {
+    static int n = 0;
+    if (n < 10) {
+        ++n;
+        __try {
+            char buf[128];
+            std::snprintf(buf, sizeof(buf), "[btn-click] #%d tool=%u t=%lu", n,
+                          *(unsigned int*)((unsigned char*)button + 68), (unsigned long)GetTickCount());
+            diag_write(buf);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+    }
+    if (o_buttonClick436) o_buttonClick436(button);
 }
 
 // 4.40：只绕过「本机已被控时禁止再当主控」。
@@ -185,6 +201,10 @@ struct InProcRecorder : hookset::IRecorder {
     void record(const char* name, void* addr, const char* how, bool ok) override {
         std::lock_guard<std::mutex> lk(g_dbgMtx);
         g_hookStats.push_back({ name, addr, how, ok });
+        char buf[160];
+        std::snprintf(buf, sizeof(buf), "[hook] %s how=%s ok=%d rva=%llx", name, how ? how : "",
+                      ok ? 1 : 0, (unsigned long long)(addr ? (uintptr_t)addr - g_gvBase : 0));
+        diag_write(buf);
     }
 };
 
@@ -222,6 +242,9 @@ void install_hooks(uintptr_t base) {
     if (V.deviceBottomButtonStateRva)
         hookset::install_at((void*)(base + V.deviceBottomButtonStateRva), "deviceBottomButtonState", "rva",
                             (void*)h_buttonState436, (void**)&o_buttonState436, rec);
+    if (V.deviceBottomButtonClickRva)
+        hookset::install_at((void*)(base + V.deviceBottomButtonClickRva), "deviceBottomButtonClick", "rva",
+                            (void*)h_buttonClick436, (void**)&o_buttonClick436, rec);
     hookset::install_at((void*)(base + V.deviceSceneRenderRva), "deviceDesktopControlAllowed", "rva",
                         (void*)h_deviceSceneRender436, (void**)&o_deviceSceneRender436, rec);
     uu_log("install_hooks done");

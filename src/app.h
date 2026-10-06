@@ -3,9 +3,9 @@
 
 // ASCII only (rc.exe reads this as ANSI). Bump UURE_VERSION + UURE_VERSION_RC together.
 #define UURE_NAME        "uu-enhance"
-#define UURE_VERSION     "1.4.5"
-#define UURE_VERSION_W   L"1.4.5"
-#define UURE_VERSION_RC  1,4,5,0
+#define UURE_VERSION     "1.4.6"
+#define UURE_VERSION_W   L"1.4.6"
+#define UURE_VERSION_RC  1,4,6,0
 #define UURE_GITHUB      "https://github.com/MiaM1ku/uu-enhance"
 #define UURE_GITHUB_W    L"https://github.com/MiaM1ku/uu-enhance"
 
