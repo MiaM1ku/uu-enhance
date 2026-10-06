@@ -3,6 +3,8 @@
 #include <vector>
 #include <mutex>
 #include <cstdint>
+#include <cstdio>
+#include <cwchar>
 #include <intrin.h>
 #include "MinHook.h"
 #include "offsets.h"
@@ -11,6 +13,50 @@
 #include "resolver.h"
 #include "hookset.h"
 #include "session.h"
+
+static uintptr_t g_gvBase = 0;   // GameViewer 模块基址，install_hooks 里赋值
+
+// 实机诊断：写 %TEMP%\uu-enhance-diag.log（不用 DebugView 也能看）。
+// 只在启动初期和 isControlled 出现新调用点时写，热路径开销可忽略。
+static void diag_write(const char* line) {
+    wchar_t dir[MAX_PATH]{};
+    if (!GetTempPathW(MAX_PATH, dir)) return;
+    wchar_t path[MAX_PATH]{};
+    if (std::swprintf(path, MAX_PATH, L"%suu-enhance-diag.log", dir) < 0) return;
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, path, L"a+, ccs=UTF-8") != 0 || !f) return;
+    std::fputs(line, f);
+    std::fputc('\n', f);
+    std::fclose(f);
+}
+
+// isControlled() 的调用者（去重，最多 24 条）：用来定位「工具能不能用」的判定在哪。
+static void diag_isctrl(uintptr_t ret) {
+    static uintptr_t seen[24]{};
+    static int n = 0;
+    for (int i = 0; i < n; ++i) if (seen[i] == ret) return;
+    if (n >= 24) return;
+    seen[n++] = ret;
+    char buf[160];
+    std::snprintf(buf, sizeof(buf), "[isctrl] #%d ret=%p rva=%llx t=%lu", n, (void*)ret,
+                  (unsigned long long)(ret - g_gvBase), (unsigned long)GetTickCount());
+    diag_write(buf);
+}
+
+// 底栏工具数组的原始内容（前 3 次）：确认官方给 +4/+5 的到底是什么。
+static void diag_tools(unsigned char* data, unsigned char* begin, unsigned char* end) {
+    static int done = 0;
+    if (done >= 3) return;
+    ++done;
+    char buf[640];
+    int n = std::snprintf(buf, sizeof(buf), "[tools] #%d data=%p count=%u t=%lu", done, (void*)data,
+                          (unsigned)((end - begin) / 8), (unsigned long)GetTickCount());
+    for (unsigned char* p = begin; p + 8 <= end && n > 0 && n < (int)sizeof(buf) - 48; p += 8) {
+        n += std::snprintf(buf + n, sizeof(buf) - n, " id=%u en=%u vis=%u",
+                           *(unsigned int*)p, (unsigned)p[4], (unsigned)p[5]);
+    }
+    diag_write(buf);
+}
 
 // 4.40：只绕过「本机已被控时禁止再当主控」。
 // isControlled() 本身仍返回真值，被控页收起/展开不受影响。
@@ -21,6 +67,7 @@ static uintptr_t g_isCtrlConnectRet436 = 0;
 static uintptr_t g_isCtrlGuardRet436 = 0;
 static bool __fastcall h_isCtrlNarrow436(void* thiz) {
     const uintptr_t ret = (uintptr_t)_ReturnAddress();
+    diag_isctrl(ret);
     if (ret == g_isCtrlConnectRet436 || ret == g_isCtrlGuardRet436) return false;
     return o_isCtrlNarrow436(thiz);
 }
@@ -49,9 +96,12 @@ static void __fastcall h_deviceSceneRender436(void* scene, unsigned char* data) 
         if (data && g_deviceDesktopAllowedOff436 && g_deviceDesktopControlledOff436) {
             const unsigned int platform = *(unsigned int*)(data + 0x60);
             if (platform == 1 || platform == 4) {
-                auto overridePtr = [&](unsigned char* ptr, unsigned char value) {
-                    if (!ptr || savedCount >= sizeof(saved) / sizeof(saved[0])) return;
-                    saved[savedCount++] = { ptr, *ptr };
+                auto overridePtr = [&](unsigned char* ptr, unsigned char value, bool restore = true) {
+                    if (!ptr) return;
+                    if (restore) {
+                        if (savedCount >= sizeof(saved) / sizeof(saved[0])) return;
+                        saved[savedCount++] = { ptr, *ptr };
+                    }
                     *ptr = value;
                 };
                 auto overrideFlag = [&](uintptr_t off, unsigned char value) {
@@ -63,15 +113,16 @@ static void __fastcall h_deviceSceneRender436(void* scene, unsigned char* data) 
                 overrideFlag(g_deviceActionAllowedOff436, 1);
                 overrideFlag(g_deviceActionControlledOff436, 0);
                 overrideFlag(g_deviceActionEnabledOff436, 1);
-                // 底栏工具项：只置启用位，保持官方的出栏集合。
-                // 置 +5 会改集合，update() 的集合 diff 又会触发整套重建，
-                // 重建后每个按钮固定 137px + 一个 52px 的「更多」，680px 放不下。
+                // 底栏工具项：只置启用位，保持官方的出栏集合（+5 不动，否则整套重建、挤一排）。
+                // 这一位不回滚：底栏按钮、右侧「更多工具」和点击后的处理都读它，
+                // 只在 render 期间改、返回就还原的话，后两处看到的还是官方的 0（灰 + 点了没反应）。
                 if (g_deviceBottomToolsVecOff436) {
                     unsigned char* begin = *(unsigned char**)(data + g_deviceBottomToolsVecOff436);
                     unsigned char* end = *(unsigned char**)(data + g_deviceBottomToolsVecOff436 + 8);
                     if (begin && end && end >= begin && (size_t)(end - begin) <= 64) {
+                        diag_tools(data, begin, end);
                         for (unsigned char* p = begin; p + 8 <= end; p += 8) {
-                            overridePtr(p + 4, 1);
+                            overridePtr(p + 4, 1, /*restore=*/false);
                         }
                     }
                 }
@@ -94,7 +145,6 @@ static void __fastcall h_deviceSceneRender436(void* scene, unsigned char* data) 
 
 static std::mutex g_dbgMtx;
 static std::vector<HookStat> g_hookStats;
-static uintptr_t g_gvBase = 0;
 static std::wstring g_gvVersion;
 static bool g_verKnown = false;
 
