@@ -70,6 +70,30 @@ static void diag_tools(unsigned char* data, unsigned char* begin, unsigned char*
     diag_write(buf);
 }
 
+// DesktopButton 的启用状态：数据层在被控时把底栏那几项设成禁用，
+// 而 DesktopButton::event 里 state==3 会直接跳过鼠标事件，所以点了没反应。
+// 直接把这条路径钉成「启用」。
+using fn_button_state436_t = void(__fastcall*)(void*, char);
+static fn_button_state436_t o_buttonState436 = nullptr;
+
+// 谁在要求禁用（去重，最多 16 条）：用来确认数据层是从哪条路径打过来的。
+static void diag_btndisable(uintptr_t ret) {
+    static uintptr_t seen[16]{};
+    static int n = 0;
+    for (int i = 0; i < n; ++i) if (seen[i] == ret) return;
+    if (n >= 16) return;
+    seen[n++] = ret;
+    char buf[128];
+    std::snprintf(buf, sizeof(buf), "[btn-disable] #%d rva=%llx t=%lu", n,
+                  (unsigned long long)(ret - g_gvBase), (unsigned long)GetTickCount());
+    diag_write(buf);
+}
+
+static void __fastcall h_buttonState436(void* button, char enabled) {
+    if (!enabled) diag_btndisable((uintptr_t)_ReturnAddress());
+    if (o_buttonState436) o_buttonState436(button, 1);
+}
+
 // 4.40：只绕过「本机已被控时禁止再当主控」。
 // isControlled() 本身仍返回真值，被控页收起/展开不受影响。
 
@@ -195,6 +219,9 @@ void install_hooks(uintptr_t base) {
     g_deviceActionControlledOff436 = V.deviceActionControlledOff;
     g_deviceActionEnabledOff436 = V.deviceActionEnabledOff;
     g_deviceBottomToolsVecOff436 = V.deviceBottomToolsVecOff;
+    if (V.deviceBottomButtonStateRva)
+        hookset::install_at((void*)(base + V.deviceBottomButtonStateRva), "deviceBottomButtonState", "rva",
+                            (void*)h_buttonState436, (void**)&o_buttonState436, rec);
     hookset::install_at((void*)(base + V.deviceSceneRenderRva), "deviceDesktopControlAllowed", "rva",
                         (void*)h_deviceSceneRender436, (void**)&o_deviceSceneRender436, rec);
     uu_log("install_hooks done");

@@ -37,17 +37,21 @@ struct VerSet {
     uintptr_t deviceDesktopAllowedOff, deviceDesktopControlledOff;
     uintptr_t deviceActionAllowedOff, deviceActionControlledOff;
     uintptr_t deviceActionEnabledOff, deviceBottomToolsVecOff;
+    // DesktopButton 的启用状态设置（setEnabled 语义：a2=0 置 state 3=禁用）。
+    // 被控时数据层走这里把底栏按钮打成禁用，按钮就点不动了（DesktopButton::event
+    // 里 state==3 直接跳过鼠标事件）。hook 成恒为启用即可。4.40 填 0 跳过。
+    uintptr_t deviceBottomButtonStateRva;
     uintptr_t imageSize;
 };
 
 inline const VerSet kVer[] = {
     // GameViewer 4.42.1.2835  SizeOfImage=0x4636000
-    { L"4.42.1.2835", 0x2CEA70, 0x2D7BDD, 0x2D7BDD, 0x3FF0B0, 0x69, 0x6a, 0x8c, 0, 0x8d, 0xd8, 0x4636000 },
+    { L"4.42.1.2835", 0x2CEA70, 0x2D7BDD, 0x2D7BDD, 0x3FF0B0, 0x69, 0x6a, 0x8c, 0, 0x8d, 0xd8, 0x6B6D80, 0x4636000 },
     // GameViewer 4.40.1.2090  SizeOfImage=0x4570000
     // RVA 与 4.40.0.1780 相同：isControlled @ 0x2C95E0，dispatcher ret @ 0x2D270D，render @ 0x3F96B0
-    { L"4.40.1.2090", 0x2C95E0, 0x2D270D, 0x2D270D, 0x3F96B0, 0x69, 0x6a, 0x8f, 0x90, 0, 0, 0x4570000 },
+    { L"4.40.1.2090", 0x2C95E0, 0x2D270D, 0x2D270D, 0x3F96B0, 0x69, 0x6a, 0x8f, 0x90, 0, 0, 0, 0x4570000 },
     // GameViewer 4.40.0.1780  SizeOfImage=0x4570000
-    { L"4.40.0.1780", 0x2C95E0, 0x2D270D, 0x2D270D, 0x3F96B0, 0x69, 0x6a, 0x8f, 0x90, 0, 0, 0x4570000 },
+    { L"4.40.0.1780", 0x2C95E0, 0x2D270D, 0x2D270D, 0x3F96B0, 0x69, 0x6a, 0x8f, 0x90, 0, 0, 0, 0x4570000 },
 };
 
 inline const VerSet& pick(const wchar_t* v) {
