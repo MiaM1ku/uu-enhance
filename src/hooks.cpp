@@ -133,6 +133,43 @@ static void __fastcall h_sigProbe1(void* o, int v) { diag_sigprobe(1, v); if (o_
 static void __fastcall h_sigProbe2(void* o, int v) { diag_sigprobe(2, v); if (o_sigProbe436[2]) o_sigProbe436[2](o, v); }
 static void __fastcall h_sigProbe3(void* o, int v) { diag_sigprobe(3, v); if (o_sigProbe436[3]) o_sigProbe436[3](o, v); }
 
+// 工具请求的接收槽：DeviceDesktopView::onDeviceTool(view, toolId)。
+// 它读 view+0x60 的 presenter，为空就静默拒绝（日志 presenter_unavailable）。
+using fn_tool_slot436_t = long long(__fastcall*)(void*, unsigned int);
+static fn_tool_slot436_t o_toolSlot436 = nullptr;
+static long long __fastcall h_toolSlot436(void* view, unsigned int tool) {
+    static int n = 0;
+    if (n < 12) {
+        ++n;
+        __try {
+            char buf[160];
+            std::snprintf(buf, sizeof(buf), "[tool-slot] #%d tool=%u view=%p presenter=%p t=%lu", n, tool, view,
+                          view ? *(void**)((unsigned char*)view + 96) : nullptr, (unsigned long)GetTickCount());
+            diag_write(buf);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+    }
+    return o_toolSlot436 ? o_toolSlot436(view, tool) : 0;
+}
+
+// presenter 注入点：能看到 presenter 什么时候被设置、什么时候被清空。
+using fn_set_presenter436_t = void(__fastcall*)(void*, void*, void*);
+static fn_set_presenter436_t o_setPresenter436 = nullptr;
+static void __fastcall h_setPresenter436(void* view, void* a2, void* a3) {
+    static int n = 0;
+    if (n < 12) {
+        ++n;
+        __try {
+            char buf[160];
+            std::snprintf(buf, sizeof(buf), "[set-presenter] #%d view=%p new=%p t=%lu", n, view,
+                          a3 ? *(void**)a3 : nullptr, (unsigned long)GetTickCount());
+            diag_write(buf);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+    }
+    if (o_setPresenter436) o_setPresenter436(view, a2, a3);
+}
+
 // HomePageContent::startRemoteAssist()（只做诊断）：点击工具后的命令入口。
 // 它开头检查 this+300（设备数据是否已初始化），不满足就静默 return。
 using fn_start_ra436_t = void(__fastcall*)(void*);
@@ -320,6 +357,12 @@ void install_hooks(uintptr_t base) {
                                 kProbeFn[i], (void**)&o_sigProbe436[i], rec);
         }
     }
+    if (V.deviceToolSlotRva)
+        hookset::install_at((void*)(base + V.deviceToolSlotRva), "deviceToolSlot", "rva",
+                            (void*)h_toolSlot436, (void**)&o_toolSlot436, rec);
+    if (V.setPresenterRva)
+        hookset::install_at((void*)(base + V.setPresenterRva), "setPresenter", "rva",
+                            (void*)h_setPresenter436, (void**)&o_setPresenter436, rec);
     hookset::install_at((void*)(base + V.deviceSceneRenderRva), "deviceDesktopControlAllowed", "rva",
                         (void*)h_deviceSceneRender436, (void**)&o_deviceSceneRender436, rec);
     uu_log("install_hooks done");

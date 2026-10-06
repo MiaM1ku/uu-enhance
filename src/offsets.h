@@ -52,17 +52,22 @@ struct VerSet {
     // 信号链探针（只做诊断）：点击工具后，信号从按钮一路转发到场景层，逐跳记录。
     // L1 按钮点击信号 / L2 底栏 deviceToolRequested / L3 底栏容器信号0 / L4 场景信号0。
     uintptr_t sigProbeRva[4];
+    // 工具请求的接收槽 DeviceDesktopView::onDeviceTool（device_desktop_view.cpp:735）与它读的
+    // presenter 字段（view+0x60）。presenter 为空时它会静默拒绝（presenter_unavailable）。
+    uintptr_t deviceToolSlotRva;
+    // DeviceDesktopView 的 presenter 注入点（只做诊断：能看到 presenter 什么时候被设成空）。
+    uintptr_t setPresenterRva;
     uintptr_t imageSize;
 };
 
 inline const VerSet kVer[] = {
     // GameViewer 4.42.1.2835  SizeOfImage=0x4636000
-    { L"4.42.1.2835", 0x2CEA70, 0x2D7BDD, 0x2D7BDD, 0x3FF0B0, 0x69, 0x6a, 0x8c, 0, 0x8d, 0xd8, 0x6B6D80, 0x6B6920, 0x2DF760, 0x2D7B90, { 0x227550, 0x2275A0, 0x2275F0, 0x227640 }, 0x4636000 },
+    { L"4.42.1.2835", 0x2CEA70, 0x2D7BDD, 0x2D7BDD, 0x3FF0B0, 0x69, 0x6a, 0x8c, 0, 0x8d, 0xd8, 0x6B6D80, 0x6B6920, 0x2DF760, 0x2D7B90, { 0x227550, 0x2275A0, 0x2275F0, 0x227640 }, 0x409620, 0x408D20, 0x4636000 },
     // GameViewer 4.40.1.2090  SizeOfImage=0x4570000
     // RVA 与 4.40.0.1780 相同：isControlled @ 0x2C95E0，dispatcher ret @ 0x2D270D，render @ 0x3F96B0
-    { L"4.40.1.2090", 0x2C95E0, 0x2D270D, 0x2D270D, 0x3F96B0, 0x69, 0x6a, 0x8f, 0x90, 0, 0, 0, 0, 0, 0, { 0, 0, 0, 0 }, 0x4570000 },
+    { L"4.40.1.2090", 0x2C95E0, 0x2D270D, 0x2D270D, 0x3F96B0, 0x69, 0x6a, 0x8f, 0x90, 0, 0, 0, 0, 0, 0, { 0, 0, 0, 0 }, 0, 0, 0x4570000 },
     // GameViewer 4.40.0.1780  SizeOfImage=0x4570000
-    { L"4.40.0.1780", 0x2C95E0, 0x2D270D, 0x2D270D, 0x3F96B0, 0x69, 0x6a, 0x8f, 0x90, 0, 0, 0, 0, 0, 0, { 0, 0, 0, 0 }, 0x4570000 },
+    { L"4.40.0.1780", 0x2C95E0, 0x2D270D, 0x2D270D, 0x3F96B0, 0x69, 0x6a, 0x8f, 0x90, 0, 0, 0, 0, 0, 0, { 0, 0, 0, 0 }, 0, 0, 0x4570000 },
 };
 
 inline const VerSet& pick(const wchar_t* v) {
