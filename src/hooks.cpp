@@ -4,7 +4,6 @@
 #include <mutex>
 #include <cstdint>
 #include <cstdio>
-#include <cwchar>
 #include <intrin.h>
 #include "MinHook.h"
 #include "offsets.h"
@@ -16,18 +15,31 @@
 
 static uintptr_t g_gvBase = 0;   // GameViewer 模块基址，install_hooks 里赋值
 
-// 实机诊断：写 %TEMP%\uu-enhance-diag.log（不用 DebugView 也能看）。
-// 只在启动初期和 isControlled 出现新调用点时写，热路径开销可忽略。
+// 实机诊断：同时写 %TEMP%\uu-enhance-diag.log 和 OutputDebugString。
+// 只用 kernel32 的 CreateFileW/WriteFile，不碰 CRT 的文件锁，
+// 因为它会在渲染线程里被调用，CRT 的 fopen 在那种上下文出过事。
 static void diag_write(const char* line) {
-    wchar_t dir[MAX_PATH]{};
-    if (!GetTempPathW(MAX_PATH, dir)) return;
-    wchar_t path[MAX_PATH]{};
-    if (std::swprintf(path, MAX_PATH, L"%suu-enhance-diag.log", dir) < 0) return;
-    FILE* f = nullptr;
-    if (_wfopen_s(&f, path, L"a+, ccs=UTF-8") != 0 || !f) return;
-    std::fputs(line, f);
-    std::fputc('\n', f);
-    std::fclose(f);
+    __try {
+        wchar_t dir[MAX_PATH]{};
+        if (GetTempPathW(MAX_PATH, dir)) {
+            wchar_t path[MAX_PATH]{};
+            size_t n = 0;
+            while (dir[n] && n < MAX_PATH - 32) { path[n] = dir[n]; ++n; }
+            const wchar_t* tail = L"uu-enhance-diag.log";
+            for (size_t i = 0; tail[i] && n + i < MAX_PATH - 1; ++i) path[n + i] = tail[i];
+            path[MAX_PATH - 1] = 0;
+            HANDLE h = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                                   OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (h != INVALID_HANDLE_VALUE) {
+                DWORD written = 0;
+                WriteFile(h, line, (DWORD)std::strlen(line), &written, nullptr);
+                WriteFile(h, "\r\n", 2, &written, nullptr);
+                CloseHandle(h);
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+    uu_log("%s", line);
 }
 
 // isControlled() 的调用者（去重，最多 24 条）：用来定位「工具能不能用」的判定在哪。
@@ -96,12 +108,9 @@ static void __fastcall h_deviceSceneRender436(void* scene, unsigned char* data) 
         if (data && g_deviceDesktopAllowedOff436 && g_deviceDesktopControlledOff436) {
             const unsigned int platform = *(unsigned int*)(data + 0x60);
             if (platform == 1 || platform == 4) {
-                auto overridePtr = [&](unsigned char* ptr, unsigned char value, bool restore = true) {
-                    if (!ptr) return;
-                    if (restore) {
-                        if (savedCount >= sizeof(saved) / sizeof(saved[0])) return;
-                        saved[savedCount++] = { ptr, *ptr };
-                    }
+                auto overridePtr = [&](unsigned char* ptr, unsigned char value) {
+                    if (!ptr || savedCount >= sizeof(saved) / sizeof(saved[0])) return;
+                    saved[savedCount++] = { ptr, *ptr };
                     *ptr = value;
                 };
                 auto overrideFlag = [&](uintptr_t off, unsigned char value) {
@@ -114,15 +123,15 @@ static void __fastcall h_deviceSceneRender436(void* scene, unsigned char* data) 
                 overrideFlag(g_deviceActionControlledOff436, 0);
                 overrideFlag(g_deviceActionEnabledOff436, 1);
                 // 底栏工具项：只置启用位，保持官方的出栏集合（+5 不动，否则整套重建、挤一排）。
-                // 这一位不回滚：底栏按钮、右侧「更多工具」和点击后的处理都读它，
-                // 只在 render 期间改、返回就还原的话，后两处看到的还是官方的 0（灰 + 点了没反应）。
+                // 这一位必须回滚：试过常驻置 1（v1.4.3），启动就崩，原因没坐实，
+                // 改成回滚是已知能跑的做法。
                 if (g_deviceBottomToolsVecOff436) {
                     unsigned char* begin = *(unsigned char**)(data + g_deviceBottomToolsVecOff436);
                     unsigned char* end = *(unsigned char**)(data + g_deviceBottomToolsVecOff436 + 8);
                     if (begin && end && end >= begin && (size_t)(end - begin) <= 64) {
                         diag_tools(data, begin, end);
                         for (unsigned char* p = begin; p + 8 <= end; p += 8) {
-                            overridePtr(p + 4, 1, /*restore=*/false);
+                            overridePtr(p + 4, 1);
                         }
                     }
                 }
