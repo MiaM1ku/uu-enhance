@@ -111,7 +111,15 @@ static void __fastcall h_buttonState436(void* button, char enabled) {
     if (o_buttonState436) o_buttonState436(button, 1);
 }
 
-// 点击动作（只做诊断）：鼠标事件有没有走到这里。
+// HomePageContent::startRemoteAssist()（点击工具后的命令入口）。
+// 它开头检查 this+300（设备数据是否已初始化），不满足就静默 return。
+using fn_start_ra436_t = void(__fastcall*)(void*);
+static fn_start_ra436_t o_startRA436 = nullptr;
+
+// 点击动作 + 观看模式的直连。
+// presenter 那条路要求 home_frame_model 活着，而它在被控状态下已经销毁
+// （weak_ptr 过期，_Ptr 虽然还留着但对象没了），所以观看模式直接走主页的发起入口，
+// 绕开 DeviceDetailPresenter 的 model 依赖。
 using fn_button_click436_t = void(__fastcall*)(void*);
 static fn_button_click436_t o_buttonClick436 = nullptr;
 static void __fastcall h_buttonClick436(void* button) {
@@ -119,7 +127,7 @@ static void __fastcall h_buttonClick436(void* button) {
     if (n < 10) {
         ++n;
         __try {
-            char buf[128];
+            char buf[200];
             std::snprintf(buf, sizeof(buf), "[btn-click] #%d tool=%u flag72=%u id64=%u t=%lu", n,
                           *(unsigned int*)((unsigned char*)button + 68),
                           (unsigned)*(unsigned char*)((unsigned char*)button + 72),
@@ -130,6 +138,19 @@ static void __fastcall h_buttonClick436(void* button) {
         }
     }
     if (o_buttonClick436) o_buttonClick436(button);
+
+    __try {
+        const unsigned int tool = *(unsigned int*)((unsigned char*)button + 68);
+        if (tool == 0 && g_homePageThis && o_startRA436) {
+            char buf[200];
+            std::snprintf(buf, sizeof(buf), "[direct-start] flag300=%u this=%p t=%lu",
+                          (unsigned)*(unsigned char*)((unsigned char*)g_homePageThis + 300), g_homePageThis,
+                          (unsigned long)GetTickCount());
+            diag_write(buf);
+            o_startRA436(g_homePageThis);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
 }
 
 // 信号链探针（只做诊断）：点击工具后信号逐跳转发，看链在哪一跳断掉。
@@ -211,10 +232,7 @@ static long long __fastcall h_presenterTool436(void* presenter, void* arg) {
     return o_presenterTool436 ? o_presenterTool436(presenter, arg) : 0;
 }
 
-// HomePageContent::startRemoteAssist()（只做诊断）：点击工具后的命令入口。
-// 它开头检查 this+300（设备数据是否已初始化），不满足就静默 return。
-using fn_start_ra436_t = void(__fastcall*)(void*);
-static fn_start_ra436_t o_startRA436 = nullptr;
+// startRemoteAssist 的调用记录（限流）。
 static void __fastcall h_startRA436(void* self) {
     static int n = 0;
     if (n < 12) {
