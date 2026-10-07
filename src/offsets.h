@@ -46,17 +46,23 @@ struct VerSet {
     // presenter+0x18 有入站会话，四个工具就全被压掉（数据层那份 +0xD8 数组的 +4
     // 同源，被控时也是 0）。转发时把会话参数当 0，能力判定原样保留。4.40 填 0 跳过。
     uintptr_t deviceToolEnabledCheckRva;
+    // 观看模式工具栏诊断（观看窗口 video_ui）：
+    // vtSlot = 观看状态槽（this+0x10 为内容对象，NULL 则布局初始化整个跳过）
+    // vtInit = 布局初始化（日志 video_layout stage=viewing_state_initial，先 ensureToolbar）
+    // vtApply = state_applied（把 32 字节初始状态拷进工具栏 +0x70，toolbar=NULL 表示被跳过）
+    // vtVis = 工具栏可见性查询（+106/+112/+120 全非零才显示）
+    uintptr_t vtSlotRva, vtInitRva, vtApplyRva, vtVisRva;
     uintptr_t imageSize;
 };
 
 inline const VerSet kVer[] = {
     // GameViewer 4.42.1.2835  SizeOfImage=0x4636000
-    { L"4.42.1.2835", 0x2CEA70, 0x2D7BDD, 0x2D7BDD, 0x3FF0B0, 0x69, 0x6a, 0x8c, 0, 0x8d, 0xd8, 0x6B6D80, 0xA88B90, 0x4636000 },
+    { L"4.42.1.2835", 0x2CEA70, 0x2D7BDD, 0x2D7BDD, 0x3FF0B0, 0x69, 0x6a, 0x8c, 0, 0x8d, 0xd8, 0x6B6D80, 0xA88B90, 0x5D3D90, 0x59C300, 0x624FB0, 0x625A50, 0x4636000 },
     // GameViewer 4.40.1.2090  SizeOfImage=0x4570000
     // RVA 与 4.40.0.1780 相同：isControlled @ 0x2C95E0，dispatcher ret @ 0x2D270D，render @ 0x3F96B0
-    { L"4.40.1.2090", 0x2C95E0, 0x2D270D, 0x2D270D, 0x3F96B0, 0x69, 0x6a, 0x8f, 0x90, 0, 0, 0, 0, 0x4570000 },
+    { L"4.40.1.2090", 0x2C95E0, 0x2D270D, 0x2D270D, 0x3F96B0, 0x69, 0x6a, 0x8f, 0x90, 0, 0, 0, 0, 0, 0, 0, 0, 0x4570000 },
     // GameViewer 4.40.0.1780  SizeOfImage=0x4570000
-    { L"4.40.0.1780", 0x2C95E0, 0x2D270D, 0x2D270D, 0x3F96B0, 0x69, 0x6a, 0x8f, 0x90, 0, 0, 0, 0, 0x4570000 },
+    { L"4.40.0.1780", 0x2C95E0, 0x2D270D, 0x2D270D, 0x3F96B0, 0x69, 0x6a, 0x8f, 0x90, 0, 0, 0, 0, 0, 0, 0, 0, 0x4570000 },
 };
 
 inline const VerSet& pick(const wchar_t* v) {

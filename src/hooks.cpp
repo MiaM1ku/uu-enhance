@@ -17,6 +17,31 @@
 
 static uintptr_t g_gvBase = 0;
 
+// 诊断日志：写 %TEMP%\uu-enhance-diag.log（Win32 CreateFileW，不碰 CRT 文件锁），同时打 OutputDebugString。
+static void diag_write(const char* line) {
+    __try {
+        wchar_t dir[MAX_PATH]{};
+        if (GetTempPathW(MAX_PATH, dir)) {
+            wchar_t path[MAX_PATH]{};
+            size_t n = 0;
+            while (dir[n] && n < MAX_PATH - 32) { path[n] = dir[n]; ++n; }
+            const wchar_t* tail = L"uu-enhance-diag.log";
+            for (size_t i = 0; tail[i] && n + i < MAX_PATH - 1; ++i) path[n + i] = tail[i];
+            path[MAX_PATH - 1] = 0;
+            HANDLE h = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                                   OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (h != INVALID_HANDLE_VALUE) {
+                DWORD written = 0;
+                WriteFile(h, line, (DWORD)std::strlen(line), &written, nullptr);
+                WriteFile(h, "\r\n", 2, &written, nullptr);
+                CloseHandle(h);
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+    uu_log("%s", line);
+}
+
 // HomePageContent 次对象上的 isControlled()：读 this+0xFA 的一字节。
 // 虚表槽 0xE0，实现经 thunk 跳到这里。
 using fn_is_ctrl436_t = bool(__fastcall*)(void*);
@@ -114,6 +139,80 @@ static unsigned char __fastcall h_toolEnabled436(void* presenter, unsigned int t
     return o_toolEnabled436 ? o_toolEnabled436(presenter, toolId, 0) : 0;
 }
 
+// ===== 观看模式工具栏诊断：工具栏构造时 +112=0、+120 低字节=0，默认隐藏，
+// 只有「布局初始化」把 32 字节观看初始状态经 state_applied 写进去才显示。
+// 链条：观看状态槽(0x5D3D90，要求 this+0x10 内容对象非空)
+//    → 布局初始化(0x59C300，先 ensureToolbar 再按 weak 块取工具栏)
+//    → state_applied(0x624FB0，把状态拷到工具栏 +0x70)
+//    → 可见性判定(0x625A50，+106/+112/+120 全非零才显示)。
+// 每环各埋一个探针，一次运行定位断点。日志行：[vt-slot] [vt-init] [vt-apply] [vt-vis]。
+using fn_vt_slot436_t = void(__fastcall*)(void*, void*);
+static fn_vt_slot436_t o_vtSlot436 = nullptr;
+static void __fastcall h_vtSlot436(void* self, void* state) {
+    __try {
+        char buf[160];
+        std::snprintf(buf, sizeof(buf), "[vt-slot] self=%p content=%p state=%p t=%lu", self,
+                      self ? *(void**)((unsigned char*)self + 16) : nullptr, state,
+                      (unsigned long)GetTickCount());
+        diag_write(buf);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+    if (o_vtSlot436) o_vtSlot436(self, state);
+}
+
+using fn_vt_init436_t = void(__fastcall*)(void*, void*);
+static fn_vt_init436_t o_vtInit436 = nullptr;
+static void __fastcall h_vtInit436(void* content, void* state) {
+    __try {
+        char buf[192];
+        unsigned char* s = (unsigned char*)state;
+        unsigned int head = 0;
+        if (s) head = *(unsigned int*)(s + 28);
+        std::snprintf(buf, sizeof(buf), "[vt-init] content=%p state=%p s0=%u s8=%u s9=%u s1b=%u weakblk=%p t=%lu",
+                      content, state, s ? (unsigned)s[0] : 999u, s ? (unsigned)s[8] : 999u,
+                      s ? (unsigned)s[9] : 999u, head,
+                      content ? *(void**)((unsigned char*)content + 56) : nullptr,
+                      (unsigned long)GetTickCount());
+        diag_write(buf);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+    if (o_vtInit436) o_vtInit436(content, state);
+}
+
+using fn_vt_apply436_t = void(__fastcall*)(void*, void*);
+static fn_vt_apply436_t o_vtApply436 = nullptr;
+static void __fastcall h_vtApply436(void* toolbar, void* state) {
+    __try {
+        char buf[160];
+        unsigned char* s = (unsigned char*)state;
+        std::snprintf(buf, sizeof(buf), "[vt-apply] toolbar=%p s0=%u s8=%u s9=%u t=%lu", toolbar,
+                      s ? (unsigned)s[0] : 999u, s ? (unsigned)s[8] : 999u, s ? (unsigned)s[9] : 999u,
+                      (unsigned long)GetTickCount());
+        diag_write(buf);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+    if (o_vtApply436) o_vtApply436(toolbar, state);
+}
+
+using fn_vt_vis436_t = void(__fastcall*)(void*);
+static fn_vt_vis436_t o_vtVis436 = nullptr;
+static void __fastcall h_vtVis436(void* toolbar) {
+    static int n = 0;
+    if (n < 6) {
+        ++n;
+        __try {
+            unsigned char* t = (unsigned char*)toolbar;
+            char buf[160];
+            std::snprintf(buf, sizeof(buf), "[vt-vis] #%d toolbar=%p f106=%u f112=%u f120=%u t=%lu", n, toolbar,
+                          (unsigned)t[106], (unsigned)t[112], (unsigned)t[120],
+                          (unsigned long)GetTickCount());
+            diag_write(buf);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+    }
+    if (o_vtVis436) o_vtVis436(toolbar);
+}
+
 static std::mutex g_dbgMtx;
 static std::vector<HookStat> g_hookStats;
 static std::wstring g_gvVersion;
@@ -163,6 +262,18 @@ void install_hooks(uintptr_t base) {
     if (V.deviceToolEnabledCheckRva)
         hookset::install_at((void*)(base + V.deviceToolEnabledCheckRva), "deviceToolEnabledCheck", "rva",
                             (void*)h_toolEnabled436, (void**)&o_toolEnabled436, rec);
+    if (V.vtSlotRva)
+        hookset::install_at((void*)(base + V.vtSlotRva), "vtSlot", "rva",
+                            (void*)h_vtSlot436, (void**)&o_vtSlot436, rec);
+    if (V.vtInitRva)
+        hookset::install_at((void*)(base + V.vtInitRva), "vtInit", "rva",
+                            (void*)h_vtInit436, (void**)&o_vtInit436, rec);
+    if (V.vtApplyRva)
+        hookset::install_at((void*)(base + V.vtApplyRva), "vtApply", "rva",
+                            (void*)h_vtApply436, (void**)&o_vtApply436, rec);
+    if (V.vtVisRva)
+        hookset::install_at((void*)(base + V.vtVisRva), "vtVis", "rva",
+                            (void*)h_vtVis436, (void**)&o_vtVis436, rec);
     hookset::install_at((void*)(base + V.deviceSceneRenderRva), "deviceDesktopControlAllowed", "rva",
                         (void*)h_deviceSceneRender436, (void**)&o_deviceSceneRender436, rec);
     uu_log("install_hooks done");
